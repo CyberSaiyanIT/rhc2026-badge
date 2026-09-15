@@ -1,0 +1,22 @@
+/dts-v1/;
+
+#include <test_include.h>
+
+/ {
+    compatible = "test,root";
+    model = "Test Model";
+
+    test_device1: test-device@0 {
+        compatible = "test,generic-device";
+        reg = <0>;
+        status = "okay";
+        int-prop = <42>;
+        string-prop = "hello";
+    };
+
+    bool-test-device {
+        compatible = "test,bool-device";
+        binding-default-false-setting-direct;
+        binding-implied-true-setting-direct;
+    };
+};

@@ -1,0 +1,25 @@
+[submodule "firmware/Libraries/FreeRTOS-Kernel"]
+	path = firmware/tactility/Libraries/FreeRTOS-Kernel
+	url = https://github.com/FreeRTOS/FreeRTOS-Kernel.git
+[submodule "firmware/Libraries/mbedtls"]
+	path = firmware/tactility/Libraries/mbedtls
+	url = https://github.com/Mbed-TLS/mbedtls.git
+[submodule "firmware/Libraries/lvgl"]
+	path = firmware/tactility/Libraries/lvgl
+	url = https://github.com/lvgl/lvgl.git
+[submodule "firmware/Libraries/SDL"]
+	path = firmware/tactility/Libraries/SDL
+	url = https://github.com/libsdl-org/SDL.git
+[submodule "firmware/Libraries/minitar/minitar"]
+	path = firmware/tactility/Libraries/minitar/minitar
+	url = https://github.com/ByteWelder/minitar.git
+[submodule "firmware/Libraries/cJSON/cJSON"]
+	path = firmware/tactility/Libraries/cJSON/cJSON
+	url = https://github.com/DaveGamble/cJSON.git
+[submodule "firmware/Libraries/esp_epaper"]
+	path = firmware/tactility/Libraries/esp_epaper
+	url = https://github.com/NellowTCS/esp_epaper.git
+[submodule "firmware/Libraries/esp-adf"]
+	path = firmware/tactility/Libraries/esp-adf
+	url = https://github.com/espressif/esp-adf.git
+	branch = release/v2.x

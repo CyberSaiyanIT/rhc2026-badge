@@ -1,0 +1,418 @@
+// SPDX-License-Identifier: Apache-2.0
+#include <driver/uart.h>
+
+#include <tactility/concurrent/mutex.h>
+#include <tactility/device.h>
+#include <tactility/driver.h>
+#include <tactility/drivers/uart_controller.h>
+#include <tactility/drivers/esp32_uart.h>
+#include <tactility/error_esp32.h>
+#include <tactility/log.h>
+#include <tactility/time.h>
+#include <tactility/drivers/gpio_descriptor.h>
+#include <tactility/drivers/esp32_gpio_helpers.h>
+
+#include <new>
+
+#define TAG "esp32_uart"
+
+struct Esp32UartInternal {
+    Mutex mutex {};
+    UartConfig config {};
+    bool config_set = false;
+    bool is_open = false;
+
+    // Pin descriptors
+    GpioDescriptor* tx_descriptor = nullptr;
+    GpioDescriptor* rx_descriptor = nullptr;
+    GpioDescriptor* cts_descriptor = nullptr;
+    GpioDescriptor* rts_descriptor = nullptr;
+
+    Esp32UartInternal() {
+        mutex_construct(&mutex);
+    }
+
+    ~Esp32UartInternal() {
+        cleanup_pins();
+        mutex_destruct(&mutex);
+    }
+
+    void cleanup_pins() {
+        release_pin(&tx_descriptor);
+        release_pin(&rx_descriptor);
+        release_pin(&cts_descriptor);
+        release_pin(&rts_descriptor);
+    }
+};
+
+#define GET_CONFIG(device) ((Esp32UartConfig*)device->config)
+#define GET_DATA(device) ((Esp32UartInternal*)device_get_driver_data(device))
+
+#define lock(data) mutex_lock(&data->mutex)
+#define unlock(data) mutex_unlock(&data->mutex)
+
+extern "C" {
+
+static uart_parity_t to_esp32_parity(enum UartParity parity) {
+    switch (parity) {
+        case UART_CONTROLLER_PARITY_DISABLE: return UART_PARITY_DISABLE;
+        case UART_CONTROLLER_PARITY_EVEN: return UART_PARITY_EVEN;
+        case UART_CONTROLLER_PARITY_ODD: return UART_PARITY_ODD;
+        default: return UART_PARITY_DISABLE;
+    }
+}
+
+static uart_word_length_t to_esp32_data_bits(enum UartDataBits bits) {
+    switch (bits) {
+        case UART_CONTROLLER_DATA_5_BITS: return UART_DATA_5_BITS;
+        case UART_CONTROLLER_DATA_6_BITS: return UART_DATA_6_BITS;
+        case UART_CONTROLLER_DATA_7_BITS: return UART_DATA_7_BITS;
+        case UART_CONTROLLER_DATA_8_BITS: return UART_DATA_8_BITS;
+        default: return UART_DATA_8_BITS;
+    }
+}
+
+static uart_stop_bits_t to_esp32_stop_bits(enum UartStopBits bits) {
+    switch (bits) {
+        case UART_CONTROLLER_STOP_BITS_1: return UART_STOP_BITS_1;
+        case UART_CONTROLLER_STOP_BITS_1_5: return UART_STOP_BITS_1_5;
+        case UART_CONTROLLER_STOP_BITS_2: return UART_STOP_BITS_2;
+        default: return UART_STOP_BITS_1;
+    }
+}
+
+static error_t read_byte(Device* device, uint8_t* out, TickType_t timeout) {
+    if (xPortInIsrContext()) return ERROR_ISR_STATUS;
+    auto* driver_data = GET_DATA(device);
+    auto* dts_config = GET_CONFIG(device);
+
+    lock(driver_data);
+    if (!driver_data->is_open) {
+        unlock(driver_data);
+        return ERROR_INVALID_STATE;
+    }
+
+    int len = uart_read_bytes(dts_config->port, out, 1, timeout);
+    unlock(driver_data);
+
+    if (len < 0) return ERROR_RESOURCE;
+    if (len == 0) return ERROR_TIMEOUT;
+    return ERROR_NONE;
+}
+
+static error_t write_byte(Device* device, uint8_t out, TickType_t timeout) {
+    if (xPortInIsrContext()) return ERROR_ISR_STATUS;
+    auto* driver_data = GET_DATA(device);
+    auto* dts_config = GET_CONFIG(device);
+
+    lock(driver_data);
+    if (!driver_data->is_open) {
+        unlock(driver_data);
+        return ERROR_INVALID_STATE;
+    }
+
+    int len = uart_write_bytes(dts_config->port, (const char*)&out, 1);
+    if (len < 0) {
+        unlock(driver_data);
+        return ERROR_RESOURCE;
+    }
+    
+    // uart_write_bytes is non-blocking on the buffer but we might want to wait for it to be sent?
+    // The API signature has timeout, but ESP-IDF's uart_write_bytes doesn't use it for blocking.
+    // However, if we want to ensure it's SENT, we could use uart_wait_tx_done.
+    if (timeout > 0) {
+        esp_err_t err = uart_wait_tx_done(dts_config->port, timeout);
+        unlock(driver_data);
+        if (err == ESP_ERR_TIMEOUT) return ERROR_TIMEOUT;
+        if (err != ESP_OK) return ERROR_RESOURCE;
+    } else {
+        unlock(driver_data);
+    }
+
+    return ERROR_NONE;
+}
+
+static error_t write_bytes(Device* device, const uint8_t* buffer, size_t buffer_size, TickType_t timeout) {
+    if (xPortInIsrContext()) return ERROR_ISR_STATUS;
+    auto* driver_data = GET_DATA(device);
+    auto* dts_config = GET_CONFIG(device);
+
+    lock(driver_data);
+    if (!driver_data->is_open) {
+        unlock(driver_data);
+        return ERROR_INVALID_STATE;
+    }
+
+    int len = uart_write_bytes(dts_config->port, (const char*)buffer, buffer_size);
+    if (len < 0) {
+        unlock(driver_data);
+        return ERROR_RESOURCE;
+    }
+
+    if (timeout > 0) {
+        esp_err_t err = uart_wait_tx_done(dts_config->port, timeout);
+        unlock(driver_data);
+        if (err == ESP_ERR_TIMEOUT) return ERROR_TIMEOUT;
+        if (err != ESP_OK) return ERROR_RESOURCE;
+    } else {
+        unlock(driver_data);
+    }
+
+    return ERROR_NONE;
+}
+
+static error_t read_bytes(Device* device, uint8_t* buffer, size_t buffer_size, TickType_t timeout) {
+    if (xPortInIsrContext()) return ERROR_ISR_STATUS;
+    auto* driver_data = GET_DATA(device);
+    auto* dts_config = GET_CONFIG(device);
+
+    lock(driver_data);
+    if (!driver_data->is_open) {
+        unlock(driver_data);
+        return ERROR_INVALID_STATE;
+    }
+
+    int len = uart_read_bytes(dts_config->port, buffer, buffer_size, timeout);
+    unlock(driver_data);
+
+    if (len < 0) return ERROR_RESOURCE;
+    if (len < (int)buffer_size) return ERROR_TIMEOUT;
+
+    return ERROR_NONE;
+}
+
+static error_t get_available(Device* device, size_t* available_bytes) {
+    auto* driver_data = GET_DATA(device);
+    auto* dts_config = GET_CONFIG(device);
+
+    lock(driver_data);
+    if (!driver_data->is_open) {
+        unlock(driver_data);
+        return ERROR_INVALID_STATE;
+    }
+
+    esp_err_t err = uart_get_buffered_data_len(dts_config->port, available_bytes);
+    unlock(driver_data);
+
+    if (err != ESP_OK) return esp_err_to_error(err);
+    return ERROR_NONE;
+}
+
+static error_t set_config(Device* device, const struct UartConfig* config) {
+    if (xPortInIsrContext()) return ERROR_ISR_STATUS;
+
+    auto* driver_data = GET_DATA(device);
+    lock(driver_data);
+
+    if (driver_data->is_open) {
+        unlock(driver_data);
+        return ERROR_INVALID_STATE;
+    }
+
+    memcpy(&driver_data->config, config, sizeof(UartConfig));
+    driver_data->config_set = true;
+
+    unlock(driver_data);
+    return ERROR_NONE;
+}
+
+static error_t get_config(Device* device, struct UartConfig* config) {
+    auto* driver_data = GET_DATA(device);
+
+    lock(driver_data);
+    if (!driver_data->config_set) {
+        unlock(driver_data);
+        return ERROR_RESOURCE;
+    }
+    memcpy(config, &driver_data->config, sizeof(UartConfig));
+    unlock(driver_data);
+
+    return ERROR_NONE;
+}
+
+static error_t open(Device* device) {
+    ESP_LOGI(TAG, "%s open", device->name);
+    if (xPortInIsrContext()) return ERROR_ISR_STATUS;
+    auto* driver_data = GET_DATA(device);
+    auto* dts_config = GET_CONFIG(device);
+
+    lock(driver_data);
+    if (driver_data->is_open) {
+        unlock(driver_data);
+        LOG_W(TAG, "%s is already open", device->name);
+        return ERROR_INVALID_STATE;
+    }
+
+    if (!driver_data->config_set) {
+        unlock(driver_data);
+        LOG_E(TAG, "%s open failed: config not set", device->name);
+        return ERROR_INVALID_STATE;
+    }
+
+    esp_err_t esp_error = uart_driver_install(dts_config->port, 1024, 0, 0, NULL, 0);
+    if (esp_error != ESP_OK) {
+        LOG_E(TAG, "%s failed to install: %s", device->name, esp_err_to_name(esp_error));
+        unlock(driver_data);
+        return esp_err_to_error(esp_error);
+    }
+
+    uart_config_t uart_config = {
+        .baud_rate = (int)driver_data->config.baud_rate,
+        .data_bits = to_esp32_data_bits(driver_data->config.data_bits),
+        .parity = to_esp32_parity(driver_data->config.parity),
+        .stop_bits = to_esp32_stop_bits(driver_data->config.stop_bits),
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE, // Flow control is not yet exposed via UartConfig
+        .rx_flow_ctrl_thresh = 0,
+        .source_clk = UART_SCLK_DEFAULT,
+        .flags = {
+            .allow_pd = 0,
+            .backup_before_sleep = 0
+        }
+    };
+
+    if (dts_config->pin_cts.gpio_controller != nullptr || dts_config->pin_rts.gpio_controller != nullptr) {
+        LOG_W(TAG, "%s: CTS/RTS pins are defined but hardware flow control is disabled (not supported in UartConfig)", device->name);
+    }
+
+    esp_error = uart_param_config(dts_config->port, &uart_config);
+    if (esp_error != ESP_OK) {
+        LOG_E(TAG, "%s failed to configure: %s", device->name, esp_err_to_name(esp_error));
+        uart_driver_delete(dts_config->port);
+        unlock(driver_data);
+        return ERROR_RESOURCE;
+    }
+
+    // Acquire pins from the specified GPIO pin specs. Optional pins are allowed.
+    bool pins_ok =
+        acquire_pin_or_set_null(dts_config->pin_tx, GPIO_FLAG_DIRECTION_OUTPUT, &driver_data->tx_descriptor) &&
+        acquire_pin_or_set_null(dts_config->pin_rx, GPIO_FLAG_DIRECTION_INPUT, &driver_data->rx_descriptor) &&
+        acquire_pin_or_set_null(dts_config->pin_cts, GPIO_FLAG_DIRECTION_INPUT, &driver_data->cts_descriptor) &&
+        acquire_pin_or_set_null(dts_config->pin_rts, GPIO_FLAG_DIRECTION_OUTPUT, &driver_data->rts_descriptor);
+
+    if (!pins_ok) {
+        LOG_E(TAG, "%s failed to acquire UART pins", device->name);
+        driver_data->cleanup_pins();
+        uart_driver_delete(dts_config->port);
+        unlock(driver_data);
+        return ERROR_RESOURCE;
+    }
+
+    esp_error = uart_set_pin(dts_config->port,
+        get_native_pin(driver_data->tx_descriptor),
+        get_native_pin(driver_data->rx_descriptor),
+        get_native_pin(driver_data->rts_descriptor),
+        get_native_pin(driver_data->cts_descriptor)
+    );
+
+    if (esp_error != ESP_OK) {
+        LOG_E(TAG, "%s failed to set uart pins: %s", device->name, esp_err_to_name(esp_error));
+        driver_data->cleanup_pins();
+        uart_driver_delete(dts_config->port);
+        unlock(driver_data);
+        return ERROR_RESOURCE;
+    }
+
+    driver_data->is_open = true;
+
+    unlock(driver_data);
+    return ERROR_NONE;
+}
+
+static error_t close(Device* device) {
+    ESP_LOGI(TAG, "%s close", device->name);
+    if (xPortInIsrContext()) return ERROR_ISR_STATUS;
+    auto* driver_data = GET_DATA(device);
+    auto* dts_config = GET_CONFIG(device);
+
+    lock(driver_data);
+    if (!driver_data->is_open) {
+        unlock(driver_data);
+        LOG_W(TAG, "Already closed");
+        return ERROR_INVALID_STATE;
+    }
+    uart_driver_delete(dts_config->port);
+    driver_data->cleanup_pins();
+    driver_data->is_open = false;
+    unlock(driver_data);
+
+    return ERROR_NONE;
+}
+
+static bool is_open(Device* device) {
+    auto* driver_data = GET_DATA(device);
+    lock(driver_data);
+    bool status = driver_data->is_open;
+    unlock(driver_data);
+    return status;
+}
+
+static error_t flush_input(Device* device) {
+    auto* driver_data = GET_DATA(device);
+    auto* dts_config = GET_CONFIG(device);
+
+    lock(driver_data);
+    if (!driver_data->is_open) {
+        unlock(driver_data);
+        return ERROR_INVALID_STATE;
+    }
+
+    esp_err_t err = uart_flush_input(dts_config->port);
+    unlock(driver_data);
+
+    return esp_err_to_error(err);
+}
+
+static error_t start(Device* device) {
+    ESP_LOGI(TAG, "%s start", device->name);
+    auto* data = new(std::nothrow) Esp32UartInternal();
+    if (!data) return ERROR_OUT_OF_MEMORY;
+
+    device_set_driver_data(device, data);
+
+    return ERROR_NONE;
+}
+
+static error_t stop(Device* device) {
+    ESP_LOGI(TAG, "%s stop", device->name);
+    auto* driver_data = GET_DATA(device);
+
+    lock(driver_data);
+    if (driver_data->is_open) {
+        unlock(driver_data);
+        return ERROR_INVALID_STATE;
+    }
+    unlock(driver_data);
+    device_set_driver_data(device, nullptr);
+    delete driver_data;
+
+    return ERROR_NONE;
+}
+
+const static UartControllerApi esp32_uart_api = {
+    .read_byte = read_byte,
+    .write_byte = write_byte,
+    .write_bytes = write_bytes,
+    .read_bytes = read_bytes,
+    .get_available = get_available,
+    .set_config = set_config,
+    .get_config = get_config,
+    .open = open,
+    .close = close,
+    .is_open = is_open,
+    .flush_input = flush_input
+};
+
+extern struct Module platform_esp32_module;
+
+Driver esp32_uart_driver = {
+    .name = "esp32_uart",
+    .compatible = (const char*[]) { "espressif,esp32-uart", nullptr },
+    .start_device = start,
+    .stop_device = stop,
+    .api = (void*)&esp32_uart_api,
+    .device_type = &UART_CONTROLLER_TYPE,
+    .owner = &platform_esp32_module,
+    .internal = nullptr
+};
+
+} // extern "C"

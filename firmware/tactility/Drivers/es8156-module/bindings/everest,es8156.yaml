@@ -1,0 +1,11 @@
+description: Everest Semiconductor ES8156 audio codec (speaker output + mic input, dual mode)
+
+include: [ "i2c-device.yaml" ]
+
+compatible: "everest,es8156"
+
+properties:
+  i2s:
+    type: phandle
+    required: true
+    description: "I2S controller device that carries audio data"

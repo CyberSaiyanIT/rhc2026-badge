@@ -1,0 +1,10 @@
+dependencies:
+  - Platforms/platform-esp32
+  - Drivers/aw9523b-module
+  - Drivers/ili9341-module
+  - Drivers/es8156-module
+  - Drivers/audio-stream-module
+  - Drivers/mfrc522-module
+  - Drivers/rgb-display-module
+dts: romhack,1.0.dts
+bindings: bindings

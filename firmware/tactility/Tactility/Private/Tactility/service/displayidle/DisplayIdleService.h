@@ -1,0 +1,109 @@
+#pragma once
+#ifdef ESP_PLATFORM
+
+#include <Tactility/service/Service.h>
+#include <Tactility/settings/DisplaySettings.h>
+#include <Tactility/Timer.h>
+
+#include <atomic>
+#include <memory>
+
+// Forward declarations
+typedef _lv_obj_t lv_obj_t;
+typedef _lv_event_t lv_event_t;
+
+namespace tt::service::displayidle {
+
+class Screensaver;
+
+class DisplayIdleService final : public Service {
+
+    std::unique_ptr<Timer> timer;
+    bool displayDimmed = false;
+    settings::display::DisplaySettings cachedDisplaySettings;
+
+    /** Previous tick's LVGL inactivity, which is how activity in between is spotted. */
+    uint32_t lastInactiveMs = 0;
+
+    lv_obj_t* screensaverOverlay = nullptr;
+    /**
+     * Drives the screensaver's animation, separately from this service's own tick.
+     *
+     * An LVGL timer runs on the LVGL task, which exists to animate and is what draws the result.
+     * tick() runs on the FreeRTOS timer daemon that every tt::Timer shares: fine for deciding
+     * whether the screensaver should be up, useless for moving it, because a busy daemon freezes
+     * the animation outright.
+     */
+    lv_timer_t* animationTimer = nullptr;
+    std::atomic<bool> stopScreensaverRequested{false};
+    std::atomic<bool> settingsReloadRequested{false};
+
+    // Active screensaver instance
+    std::unique_ptr<Screensaver> screensaver;
+
+    // Screensaver auto-off: turn off backlight after 5 minutes of screensaver
+    static constexpr uint32_t TICK_INTERVAL_MS = 50;
+    static constexpr uint32_t SCREENSAVER_AUTO_OFF_MS = 5 * 60 * 1000;  // 5 minutes
+    static constexpr int SCREENSAVER_AUTO_OFF_TICKS = SCREENSAVER_AUTO_OFF_MS / TICK_INTERVAL_MS;
+    int screensaverActiveCounter = 0;
+    bool backlightOff = false;
+
+    static void stopScreensaverCb(lv_event_t* e);
+    static void animationTimerCb(lv_timer_t* timer);
+
+    /** @pre Caller must hold LVGL lock */
+    void stopAnimationTimer();
+
+    /** How often the screensaver is advanced, independently of TICK_INTERVAL_MS. */
+    static constexpr uint32_t ANIMATION_INTERVAL_MS = 33;
+
+    /** @pre Caller must hold LVGL lock */
+    void activateScreensaver();
+
+    /** @pre Caller must hold LVGL lock */
+    void updateScreensaver();
+
+    void tick();
+
+public:
+    bool onStart(ServiceContext& service) override;
+    void onStop(ServiceContext& service) override;
+
+    /**
+     * Force the screensaver to start immediately, regardless of idle timeout.
+     * @note Not thread-safe. Call from LVGL/main context only, not from
+     *       arbitrary threads while the timer is running.
+     */
+    void startScreensaver();
+
+    /**
+     * Force the screensaver to stop immediately and restore backlight.
+     * @note Not thread-safe. Call from LVGL/main context only, not from
+     *       arbitrary threads while the timer is running.
+     */
+    void stopScreensaver();
+
+    /**
+     * Check if the screensaver is currently active.
+     * @return true if the screensaver overlay is visible
+     * @note Not thread-safe. Call from timer thread or LVGL context only.
+     */
+    bool isScreensaverActive() const;
+
+    /**
+     * Request reload of display settings from storage.
+     * Thread-safe: can be called from any thread. Actual reload
+     * happens on the next timer tick.
+     */
+    void reloadSettings();
+};
+
+/**
+ * Find the DisplayIdle service instance.
+ * @return shared pointer to the service, or nullptr if not found
+ */
+std::shared_ptr<DisplayIdleService> findService();
+
+} // namespace tt::service::displayidle
+
+#endif // ESP_PLATFORM

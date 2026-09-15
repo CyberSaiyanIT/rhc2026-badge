@@ -1,0 +1,5 @@
+compatible: "romhack,keypad"
+description: Romhack keypad
+properties:
+  compatible:
+    type: string

@@ -1,0 +1,195 @@
+// SPDX-License-Identifier: Apache-2.0
+#pragma once
+
+#include <app/instance.h>
+#include <app/manifest.h>
+#include <app/stream.h>
+
+#include <tactility/error.h>
+
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * Register an app manifest.
+ * @retval ERROR_INVALID_ARGUMENT a manifest with the same id is already registered
+ * @retval ERROR_NONE on success
+ */
+error_t app_manager_add(const struct AppManifest* manifest);
+
+/**
+ * Unregister a previously-added manifest.
+ * @retval ERROR_NOT_FOUND no manifest with this id is registered
+ * @retval ERROR_NONE on success
+ */
+error_t app_manager_remove(const char* id);
+
+/**
+ * @param[out] out_manifest set to a copy of the manifest on success
+ * @retval ERROR_NOT_FOUND no manifest with this id is registered
+ * @retval ERROR_NONE on success
+ */
+error_t app_manager_find_manifest(const char* id, struct AppManifest* out_manifest);
+
+/**
+ * Calls `@a` visitor once for every registered manifest. Iteration order is unspecified.
+ * `@warning` `@a` visitor runs with app-module's internal registry lock held. Do not call any
+ * app_manager_*() function from inside `@a` visitor - copy out what you need and act on it after
+ * this call returns.
+ */
+typedef void (*AppManifestVisitorFn)(const struct AppManifest* manifest, void* context);
+void app_manager_for_each_manifest(AppManifestVisitorFn visitor, void* context);
+
+/**
+ * Starts a new instance of the app registered under @a id. Every app instance gets its own
+ * dedicated task for its entire lifetime - starting an app never asks any other app to give up
+ * its task, and multiple instances (of the same or different apps) can be Active at once.
+ * @param[in] id the manifest id to start
+ * @param[out] out_app_instance_id the id of the new app instance
+ * @retval ERROR_NOT_FOUND no manifest with this id is registered, or no AppLoaderApi is registered
+ * @retval ERROR_NONE on success
+ */
+error_t app_manager_start(const char* id, AppInstanceId* out_app_instance_id);
+
+/**
+ * Same as app_manager_start(), but also passes @a argc/@a argv to the new instance's own main
+ * function (see app/loader.h's AppMainFn) - modelled on a C program's main(argc, argv). For
+ * regular (non-modal) navigations that need to pass data to the target app (e.g. "show details
+ * for this app id") without expecting a result back.
+ * @param[in] argv @a argc strings; app-module makes its own deep copy before returning, so
+ * @a argv and the strings it points to may be freed/go out of scope immediately after this call
+ * returns (e.g. safe to pass a stack-local array of a caller's own std::string::c_str()s).
+ */
+error_t app_manager_start_with_parameters(const char* id, int argc, const char* const argv[], AppInstanceId* out_app_instance_id);
+
+/**
+ * Starts @a id as a modal child of @a parent_instance_id, for the purpose of receiving a
+ * result. The parent keeps running (window_manager's own multi-window stack handles burying its
+ * window while the child is shown).
+ *
+ * When the child's task exits, an APP_EVENT_RESULT is delivered to @a parent_instance_id -
+ * result is whatever the child's AppMainFn/AppLoaderApi::run() returned - unless
+ * @a parent_instance_id is 0, in which case no result is delivered (fire-and-forget, for
+ * callers with no app_instance_id of their own). The parent is then responsible for calling
+ * app_manager_stop() on the child's instance id to fully reap it. Children that need to hand
+ * back more than an int32_t (e.g. picked text, a path) expose their own "get last result"
+ * getter for the parent to call after receiving the event - see e.g.
+ * tt::app::inputdialog::getLastText().
+ * @param[in] argv @a argc strings; app-module makes its own deep copy before returning (same as
+ * app_manager_start_with_parameters()), so @a argv and the strings it points to may be
+ * freed/go out of scope immediately after this call returns.
+ * @retval ERROR_NOT_FOUND no manifest with this id is registered, or no AppLoaderApi is registered
+ * @retval ERROR_NONE on success
+ */
+error_t app_manager_start_for_result(const char* id, AppInstanceId parent_instance_id, int argc, const char* const argv[], AppInstanceId* out_app_instance_id);
+
+/** One fd-to-stream binding for app_manager_start_with_streams(). Every field is passed through
+ * to app_stream_subscribe() as-is; see its own doc for the ownership contracts. */
+struct AppStreamBinding {
+    int producer_fd;
+    struct AppStream* stream;
+    void* buffer;
+    size_t buffer_capacity;
+    struct TaskEventGroup* event_group;
+};
+
+/**
+ * Same as app_manager_start(), but installs @a bindings into the new instance's fd table before
+ * its task begins executing (e.g. a child's stdio, piped through parent-owned AppStreams; see
+ * app/stream.h). Writes the new instance's id into each bound stream's producer_id itself, since
+ * the caller cannot know it in advance.
+ * @param[in] bindings @a binding_count entries; each stream and buffer must stay alive (see
+ * app_stream_subscribe()) until unsubscribed or the child exits.
+ * @retval ERROR_NOT_FOUND no manifest with this id is registered, or no AppLoaderApi is registered
+ * @retval ERROR_OUT_OF_RANGE a binding's producer_fd is out of range
+ * @retval ERROR_RESOURCE a binding's event_group has no free bits left to claim
+ * @retval ERROR_NONE on success
+ */
+error_t app_manager_start_with_streams(const char* id, const struct AppStreamBinding* bindings, size_t binding_count, AppInstanceId* out_app_instance_id);
+
+/**
+ * Combines app_manager_start_for_result() and app_manager_start_with_streams(): starts @a id as
+ * a modal child of @a parent_instance_id (see app_manager_start_for_result()'s own doc for the
+ * result-delivery contract) with @a bindings installed into its fd table before its task begins
+ * executing (see app_manager_start_with_streams()'s own doc for stream ownership). For a child
+ * that needs to hand back more than an int32_t (e.g. a path) via its own stdout instead of the
+ * "get last result" getter pattern (see app_manager_start_for_result()) - see e.g.
+ * tt::app::fileselection::startForExistingFile().
+ * @param[in] argv see app_manager_start_for_result().
+ * @param[in] bindings see app_manager_start_with_streams().
+ * @retval ERROR_NOT_FOUND no manifest with this id is registered, or no AppLoaderApi is registered
+ * @retval ERROR_OUT_OF_RANGE a binding's producer_fd is out of range
+ * @retval ERROR_RESOURCE a binding's event_group has no free bits left to claim
+ * @retval ERROR_NONE on success
+ */
+error_t app_manager_start_for_result_with_streams(const char* id, AppInstanceId parent_instance_id, int argc, const char* const argv[], const struct AppStreamBinding* bindings, size_t binding_count, AppInstanceId* out_app_instance_id);
+
+/**
+ * Stop an app instance permanently. Emits APP_EVENT_CLOSE and bound-waits for its task to exit
+ * if it was running.
+ * @warning Must not be called from the instance's own task (it bound-waits via thread_join(),
+ * which asserts against joining yourself) - an app closes itself by returning from its own
+ * AppMainFn/AppLoaderApi::run(), not by calling this on itself.
+ */
+error_t app_manager_stop(AppInstanceId app_instance_id);
+
+/** @return the instance's current state, or APP_INSTANCE_STATE_STOPPED if the id is unknown. */
+AppInstanceState app_manager_get_state(AppInstanceId app_instance_id);
+
+/**
+ * @param[out] out_app_instance_id set to the instance id of the topmost currently-Active app -
+ * the most recently started of whichever instances are Active (a modal child launched via
+ * app_manager_start_for_result() stays Active alongside its parent while shown, so this
+ * correctly picks the child, not the parent, while a dialog is up).
+ * @retval ERROR_NOT_FOUND no app is Active
+ * @retval ERROR_NONE on success
+ */
+error_t app_manager_get_topmost_instance_id(AppInstanceId* out_app_instance_id);
+
+/**
+ * Same as app_manager_get_topmost_instance_id(), but resolves straight to the topmost app's
+ * manifest id string.
+ * @param[out] buffer always NULL-terminated on return, even on failure (empty string if
+ * @a buffer_size == 0 - nothing is written in that case; otherwise at least "" is written)
+ * @retval ERROR_NOT_FOUND no app is Active
+ * @retval ERROR_BUFFER_OVERFLOW @a buffer_size is too small to hold the id (including the NULL
+ * terminator)
+ * @retval ERROR_NONE on success
+ */
+error_t app_manager_get_topmost_app_id(char* buffer, size_t buffer_size);
+
+/**
+ * Registers @a path as a directory to scan for app manifests - each direct subdirectory of
+ * @a path is expected to hold a manifest.properties (see app/metadata.h), matching the layout
+ * app_install() creates ({install dir}/{app_id}/manifest.properties), though this is not
+ * install/uninstall - it only ever adds/removes manifest registrations, never touches files on
+ * disk or running instances. No-op if @a path is already registered. Does not scan immediately -
+ * call app_manager_install_path_scan() to do that.
+ * @retval ERROR_NONE on success
+ */
+error_t app_manager_install_path_add(const char* path);
+
+/**
+ * Scans every path registered via app_manager_install_path_add(): registers
+ * (app_manager_add()) any direct subdirectory with a valid manifest.properties that isn't
+ * already registered, and unregisters (app_manager_remove() only - does not stop it if running,
+ * does not delete anything) any manifest a previous scan registered whose directory has since
+ * disappeared. Safe to call repeatedly (e.g. after an SD card is mounted/unmounted).
+ */
+void app_manager_install_path_scan(void);
+
+/**
+ * Uninstalls an app that was registered via app_manager_install_path_scan() (i.e. discovered on
+ * disk, not installed via app_install()). Stops running instances, removes the manifest
+ * registration, and deletes the app directory. Returns ERROR_NOT_FOUND if the app id is not in
+ * the scan registry.
+ */
+error_t app_manager_install_path_uninstall(const char* app_id);
+
+#ifdef __cplusplus
+}
+#endif

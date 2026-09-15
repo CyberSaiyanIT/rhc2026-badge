@@ -1,0 +1,10 @@
+description: Generic test device binding
+compatible: "test,generic-device"
+properties:
+  reg:
+    type: int
+    required: true
+  int-prop:
+    type: int
+  string-prop:
+    type: string

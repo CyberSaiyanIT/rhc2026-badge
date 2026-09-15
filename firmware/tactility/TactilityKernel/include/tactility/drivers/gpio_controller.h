@@ -1,0 +1,232 @@
+// SPDX-License-Identifier: Apache-2.0
+
+#pragma once
+
+#include "gpio.h"
+#include <tactility/error.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+struct Device;
+struct GpioDescriptor;
+
+struct GpioControllerApi {
+    /**
+     * @brief Sets the logical level of a GPIO pin.
+     * @param[in,out] descriptor the pin descriptor
+     * @param[in] high true to set the pin high, false to set it low
+     * @return ERROR_NONE if successful
+     */
+    error_t (*set_level)(struct GpioDescriptor* descriptor, bool high);
+
+    /**
+     * @brief Gets the logical level of a GPIO pin.
+     * @param[in] descriptor the pin descriptor
+     * @param[out] high pointer to store the pin level
+     * @return ERROR_NONE if successful
+     */
+    error_t (*get_level)(struct GpioDescriptor* descriptor, bool* high);
+
+    /**
+     * @brief Configures the options for a GPIO pin.
+     * @param[in,out] descriptor the pin descriptor
+     * @param[in] flags configuration flags (direction, pull-up/down, etc.)
+     * @return ERROR_NONE if successful
+     */
+    error_t (*set_flags)(struct GpioDescriptor* descriptor, gpio_flags_t flags);
+
+    /**
+     * @brief Gets the configuration options for a GPIO pin.
+     * @param[in] descriptor the pin descriptor
+     * @param[out] flags pointer to store the configuration flags
+     * @return ERROR_NONE if successful
+     */
+    error_t (*get_flags)(struct GpioDescriptor* descriptor, gpio_flags_t* flags);
+
+    /**
+     * @brief Gets the native pin number associated with a descriptor.
+     * @param[in] descriptor the pin descriptor
+     * @param[out] pin_number pointer to store the pin number
+     * @return ERROR_NONE if successful
+     */
+    error_t (*get_native_pin_number)(struct GpioDescriptor* descriptor, void* pin_number);
+
+    /**
+     * @brief Adds a callback to be called when a GPIO interrupt occurs.
+     * @param[in] descriptor the pin descriptor
+     * @param[in] callback the callback function
+     * @param[in] arg the argument to pass to the callback
+     * @return ERROR_NONE if successful, ERROR_NOT_SUPPORTED if not implemented
+     */
+    error_t (*add_callback)(struct GpioDescriptor* descriptor, void (*callback)(void*), void* arg);
+
+    /**
+     * @brief Removes a callback from a GPIO interrupt.
+     * @param[in] descriptor the pin descriptor
+     * @return ERROR_NONE if successful, ERROR_NOT_SUPPORTED if not implemented
+     */
+    error_t (*remove_callback)(struct GpioDescriptor* descriptor);
+
+    /**
+     * @brief Enables the interrupt for a GPIO pin.
+     * @param[in] descriptor the pin descriptor
+     * @return ERROR_NONE if successful, ERROR_NOT_SUPPORTED if not implemented
+     */
+    error_t (*enable_interrupt)(struct GpioDescriptor* descriptor);
+
+    /**
+     * @brief Disables the interrupt for a GPIO pin.
+     * @param[in] descriptor the pin descriptor
+     * @return ERROR_NONE if successful, ERROR_NOT_SUPPORTED if not implemented
+     */
+    error_t (*disable_interrupt)(struct GpioDescriptor* descriptor);
+};
+
+struct GpioDescriptor* gpio_descriptor_acquire(
+    struct Device* controller,
+    gpio_pin_t pin_number,
+    gpio_flags_t flags,
+    enum GpioOwnerType owner
+);
+
+struct GpioDescriptor* gpio_descriptor_acquire_pin_spec(
+    struct GpioPinSpec const* pin_spec,
+    enum GpioOwnerType owner
+);
+
+error_t gpio_descriptor_release(struct GpioDescriptor* descriptor);
+
+/**
+ * @brief Gets the pin number associated with a descriptor.
+ * @param[in] descriptor the pin descriptor
+ * @param[out] pin pointer to store the pin number
+ * @return ERROR_NONE if successful
+ */
+error_t gpio_descriptor_get_pin_number(struct GpioDescriptor* descriptor, gpio_pin_t* pin);
+
+/**
+ * @brief Gets the pin owner type associated with a descriptor.
+ * @param[in] descriptor the pin descriptor
+ * @param[out] owner_type pointer to output owner type
+ * @return ERROR_NONE if successful
+ */
+error_t gpio_descriptor_get_owner_type(struct GpioDescriptor* descriptor, enum GpioOwnerType* owner_type);
+
+/**
+ * @brief Sets the logical level of a GPIO pin.
+ * @param[in] descriptor the pin descriptor
+ * @param[in] high true to set the pin high, false to set it low
+ * @return ERROR_NONE if successful
+ */
+error_t gpio_descriptor_set_level(struct GpioDescriptor* descriptor, bool high);
+
+/**
+ * @brief Gets the logical level of a GPIO pin.
+ * @param[in] descriptor the pin descriptor
+ * @param[out] high pointer to store the pin level
+ * @return ERROR_NONE if successful
+ */
+error_t gpio_descriptor_get_level(struct GpioDescriptor* descriptor, bool* high);
+
+/**
+ * @brief Configures the options for a GPIO pin.
+ * @param[in] descriptor the pin descriptor
+ * @param[in] flags configuration flags (direction, pull-up/down, etc.)
+ * @return ERROR_NONE if successful
+ */
+error_t gpio_descriptor_set_flags(struct GpioDescriptor* descriptor, gpio_flags_t flags);
+
+/**
+ * @brief Gets the configuration options for a GPIO pin.
+ * @param[in] descriptor the pin descriptor
+ * @param[out] flags pointer to store the configuration flags
+ * @return ERROR_NONE if successful
+ */
+error_t gpio_descriptor_get_flags(struct GpioDescriptor* descriptor, gpio_flags_t* flags);
+
+/**
+ * @brief Gets the configuration options for a GPIO pin.
+ * @param[in] descriptor the pin descriptor
+ * @param[out] flags 1 or more flags to check
+ * @param[out] has_flags true when all flags are available
+ * @return ERROR_NONE if successful
+ */
+error_t gpio_descriptor_has_flags(struct GpioDescriptor* descriptor, gpio_flags_t flags, bool* has_flags);
+
+/**
+ * @brief Gets the native pin number associated with a descriptor.
+ * @param[in] descriptor the pin descriptor
+ * @param[out] pin_number pointer to store the pin number
+ * @return ERROR_NONE if successful
+ */
+error_t gpio_descriptor_get_native_pin_number(struct GpioDescriptor* descriptor, void* pin_number);
+
+/**
+ * @brief Adds a callback to be called when a GPIO interrupt occurs.
+ * @param[in] descriptor the pin descriptor
+ * @param[in] callback the callback function
+ * @param[in] arg the argument to pass to the callback
+ * @return ERROR_NONE if successful, ERROR_NOT_SUPPORTED if not implemented
+ */
+error_t gpio_descriptor_add_callback(struct GpioDescriptor* descriptor, void (*callback)(void*), void* arg);
+
+/**
+ * @brief Removes a callback from a GPIO interrupt.
+ * @param[in] descriptor the pin descriptor
+ * @return ERROR_NONE if successful, ERROR_NOT_SUPPORTED if not implemented
+ */
+error_t gpio_descriptor_remove_callback(struct GpioDescriptor* descriptor);
+
+/**
+ * @brief Enables the interrupt for a GPIO pin.
+ * @param[in] descriptor the pin descriptor
+ * @return ERROR_NONE if successful, ERROR_NOT_SUPPORTED if not implemented
+ */
+error_t gpio_descriptor_enable_interrupt(struct GpioDescriptor* descriptor);
+
+/**
+ * @brief Disables the interrupt for a GPIO pin.
+ * @param[in] descriptor the pin descriptor
+ * @return ERROR_NONE if successful, ERROR_NOT_SUPPORTED if not implemented
+ */
+error_t gpio_descriptor_disable_interrupt(struct GpioDescriptor* descriptor);
+
+/**
+ * @brief Gets the number of pins supported by the controller.
+ * @param[in] device the GPIO controller device
+ * @param[out] count pointer to store the number of pins
+ * @return ERROR_NONE if successful
+ */
+error_t gpio_controller_get_pin_count(struct Device* device, uint32_t* count);
+
+/**
+ * @brief Initializes GPIO descriptors for a controller.
+ * @param[in,out] device the GPIO controller device
+ * @param[in] controller_context pointer to store in the controller's internal data
+ * @return ERROR_NONE if successful
+ */
+error_t gpio_controller_init_descriptors(struct Device* device, uint32_t pin_count, void* controller_context);
+
+/**
+ * @brief Deinitializes GPIO descriptors for a controller.
+ * @param[in,out] device the GPIO controller device
+ * @return ERROR_NONE if successful
+ */
+error_t gpio_controller_deinit_descriptors(struct Device* device);
+
+/**
+ * Unlike other drivers, a GPIO controller's internal data is created and set by gpio_controller_init_descriptors()
+ * This means that the specific controller implementation cannot set the device's driver data, as it's already set by the GPIO controller base coded
+ * When calling init descriptors, the caller can pass a controller_context, which is an optional pointer that holds the implementation's internal data.
+ * @param device the GPIO controller device
+ * @return the context void pointer
+ */
+void* gpio_controller_get_controller_context(struct Device* device);
+
+extern const struct DeviceType GPIO_CONTROLLER_TYPE;
+
+#ifdef __cplusplus
+}
+#endif

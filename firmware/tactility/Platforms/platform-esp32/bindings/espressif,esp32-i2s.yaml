@@ -1,0 +1,33 @@
+description: ESP32 I2S Controller
+
+include: ["i2s-controller.yaml"]
+
+compatible: "espressif,esp32-i2s"
+
+properties:
+  port:
+    type: int
+    required: true
+    description: |
+      The port number, defined by i2s_port_t.
+      Depending on the hardware, these values are available: I2S_NUM_0, I2S_NUM_1
+  pin-bclk:
+    type: phandles
+    default: GPIO_PIN_SPEC_NONE
+    description: Bit clock pin. Not used in PDM RX mode (e.g. a PDM microphone), where pin-ws carries the PDM clock instead.
+  pin-ws:
+    type: phandles
+    required: true
+    description: Word (slot) select pin. Doubles as the PDM clock pin in PDM RX mode.
+  pin-data-out:
+    type: phandles
+    default: GPIO_PIN_SPEC_NONE
+    description: Data output pin
+  pin-data-in:
+    type: phandles
+    default: GPIO_PIN_SPEC_NONE
+    description: Data input pin
+  pin-mclk:
+    type: phandles
+    default: GPIO_PIN_SPEC_NONE
+    description: Master clock pin

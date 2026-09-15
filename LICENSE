@@ -1,0 +1,26 @@
+Romhack Camp Badge 2026
+=======================
+
+This repository holds two separately licensed firmware projects. They are built as
+separate binaries into separate flash partitions and are never linked or combined into
+one work, so their licences apply independently:
+
+  firmware/tactility/   derived from Tactility (https://github.com/TactilityProject/Tactility)
+                        Tactility/ and Firmware/ are GPL v3.0.
+                        Modules/, and most of Devices/ and Drivers/, are Apache 2.0.
+                        See firmware/tactility/LICENSE.md for the per-subproject breakdown
+                        and firmware/tactility/Documentation/ for the licence texts.
+
+  firmware/retro-go/    derived from Retro-Go (https://github.com/ducalex/retro-go)
+                        GPL v2.0, except retro-core/components/handy (Lynx emulator, zlib).
+                        See firmware/retro-go/COPYING.
+
+Changes made for this badge are released under the licence of the file they modify.
+
+Third-party components keep their own licences; each carries its COPYING, LICENSE or
+NOTICE file alongside the source it applies to. firmware/tactility/THIRD-PARTY-NOTICES.md
+lists the ones vendored into that tree.
+
+GPL v2.0 and GPL v3.0 are not compatible with one another. Nothing in this repository
+combines code from the two trees, and the two firmware images do not share linkage,
+headers or a build. Keep it that way.

@@ -1,0 +1,51 @@
+#ifdef ESP_PLATFORM
+
+#pragma once
+
+#include <cstdio>
+
+#define CRASH_DATA_CALLSTACK_LIMIT 64
+#define CRASH_DATA_INCLUDES_SP false
+#define CRASH_DATA_REASON_LENGTH 128
+
+/** Represents a single frame on the callstack. */
+struct CallstackFrame {
+    uint32_t pc = 0;
+#if CRASH_DATA_INCLUDES_SP
+    uint32_t sp = 0;
+#endif
+};
+
+/** Broad category of what caused the panic (mirrors ESP-IDF's panic_exception_t). */
+enum class CrashCause : uint8_t {
+    Unknown,
+    Debug,
+    WatchdogInterrupt,
+    WatchdogTask,
+    Abort,
+    Fault,
+};
+
+/** Callstack-related crash data. */
+struct CrashData {
+    bool callstackCorrupted = false;
+    uint8_t callstackLength = 0;
+    CallstackFrame callstack[CRASH_DATA_CALLSTACK_LIMIT];
+
+    CrashCause cause = CrashCause::Unknown;
+    uint32_t faultAddress = 0;
+    char reason[CRASH_DATA_REASON_LENGTH] = { 0 };
+
+    /**
+     * The address the faulting instruction touched, EXCVADDR on Xtensa and MTVAL on RISC-V, as
+     * opposed to `faultAddress` where that instruction lives. CrashCause::Fault only, and appended
+     * after `reason` so an older build's record keeps every other field at its old offset.
+     */
+    uint32_t faultDataAddress = 0;
+    bool faultDataAddressValid = false;
+};
+
+/** @return the crash data */
+const CrashData& getRtcCrashData();
+
+#endif

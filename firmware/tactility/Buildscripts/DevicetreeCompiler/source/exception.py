@@ -1,0 +1,2 @@
+class DevicetreeException(Exception):
+    pass

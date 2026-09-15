@@ -1,0 +1,70 @@
+description: ESP32 SDMMC
+
+compatible: "espressif,esp32-sdmmc"
+
+properties:
+  pin-clk:
+    type: phandles
+    required: true
+  pin-cmd:
+    type: phandles
+    required: true
+  pin-d0:
+    type: phandles
+    required: true
+  pin-d1:
+    type: phandles
+    default: GPIO_PIN_SPEC_NONE
+  pin-d2:
+    type: phandles
+    default: GPIO_PIN_SPEC_NONE
+  pin-d3:
+    type: phandles
+    default: GPIO_PIN_SPEC_NONE
+  pin-d4:
+    type: phandles
+    default: GPIO_PIN_SPEC_NONE
+  pin-d5:
+    type: phandles
+    default: GPIO_PIN_SPEC_NONE
+  pin-d6:
+    type: phandles
+    default: GPIO_PIN_SPEC_NONE
+  pin-d7:
+    type: phandles
+    default: GPIO_PIN_SPEC_NONE
+  pin-cd:
+    type: phandles
+    default: GPIO_PIN_SPEC_NONE
+  pin-wp:
+    type: phandles
+    default: GPIO_PIN_SPEC_NONE
+  bus-width:
+    type: int
+    required: true
+    description: Bus width in bits
+  slot:
+    type: int
+    enum: [0, 1]
+    description: SDMMC host slot number (SDMMC_HOST_SLOT_0 or SDMMC_HOST_SLOT_1). On ESP32-P4, slot 0 uses the dedicated (non-GPIO-matrix) pins.
+  max-freq-khz:
+    type: int
+    default: 20000
+    minimum: 1
+    description: Maximum SDMMC clock frequency in kHz (e.g. 40000 for SDMMC_FREQ_HIGHSPEED)
+  wp-active-high:
+    type: boolean
+    default: false
+    description: Whether the WP pin is active high
+  enable-uhs:
+    type: boolean
+    default: false
+    description: Enable UHS mode
+  pullups:
+    type: boolean
+    default: false
+    description: Enable internal pullups for SDMMC pins
+  on-chip-ldo-chan:
+    type: int
+    default: -1
+    description: On-chip LDO channel for SD power (e.g. 4 for LDO4). Set to -1 to disable.

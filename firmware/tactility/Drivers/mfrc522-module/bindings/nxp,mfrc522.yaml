@@ -1,0 +1,14 @@
+compatible: "nxp,mfrc522"
+description: NXP MFRC522 RFID Reader
+properties:
+  compatible:
+    type: string
+  pin-reset:
+    type: phandles
+    default: GPIO_PIN_SPEC_NONE
+  supply:
+    type: phandle
+    default: "NULL"
+    description: >
+      Power rail that holds the reader in reset while off, as an alternative to pin-reset. Enabling
+      it releases the reset, so the rail's startup-delay-us must cover the reader's boot time.

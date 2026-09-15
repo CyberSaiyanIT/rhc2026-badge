@@ -1,0 +1,71 @@
+// SPDX-License-Identifier: Apache-2.0
+#include <lvgl/module.h>
+#include <string.h>
+#include <tactility/check.h>
+#include <tactility/module.h>
+#include <lvgl/lvgl.h>
+
+extern const struct ModuleSymbol lvgl_module_symbols[];
+error_t lvgl_arch_start();
+error_t lvgl_arch_stop();
+
+static bool is_running = false;
+static bool is_configured = false;
+
+struct LvglModuleConfig lvgl_module_config = {
+    NULL,
+    NULL,
+    0,
+    0,
+#ifdef ESP_PLATFORM
+    0,
+#endif
+};
+
+void lvgl_module_configure(const struct LvglModuleConfig config) {
+    check(!is_running);
+    lvgl_module_config = config;
+    is_configured = true;
+}
+
+static error_t start() {
+    if (!is_configured) {
+        return ERROR_INVALID_STATE;
+    }
+
+    if (is_running) {
+        return ERROR_NONE;
+    }
+
+    error_t result = lvgl_arch_start();
+    if (result == ERROR_NONE) {
+        is_running = true;
+    }
+
+    return result;
+}
+
+static error_t stop() {
+    if (!is_running) {
+        return ERROR_NONE;
+    }
+
+    error_t error = lvgl_arch_stop();
+    if (error == ERROR_NONE) {
+        is_running = false;
+    }
+
+    return error;
+}
+
+bool lvgl_is_running() {
+    return is_running;
+}
+
+struct Module lvgl_module = {
+    .name = "lvgl",
+    .start = start,
+    .stop = stop,
+    .symbols = (const struct ModuleSymbol*)lvgl_module_symbols,
+    .internal = NULL,
+};

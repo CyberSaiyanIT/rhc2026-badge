@@ -1,0 +1,171 @@
+/dts-v1/;
+
+#include <tactility/bindings/root.h>
+#include <tactility/bindings/esp32_gpio.h>
+#include <tactility/bindings/esp32_i2c.h>
+#include <tactility/bindings/esp32_i2s.h>
+#include <tactility/bindings/esp32_sdmmc.h>
+#include <tactility/bindings/esp32_spi.h>
+#include <tactility/bindings/esp32_pwm_ledc.h>
+#include <tactility/bindings/gpio_hog.h>
+#include <tactility/bindings/pwm_backlight.h>
+#include <bindings/aw9523b.h>
+#include <bindings/ili9341.h>
+#include <bindings/romhack_keypad.h>
+#include <bindings/romhack_power_rail.h>
+#include <bindings/nxp_mfrc522.h>
+#include <bindings/es8156.h>
+#include <tactility/bindings/esp32_wifi_pinned.h>
+#include <tactility/bindings/esp32_ble.h>
+#include <bindings/rgb_display.h>
+
+#include <tactility/bindings/esp32_adc_oneshot.h>
+#include <tactility/bindings/battery_sense.h>
+
+/ {
+	compatible = "root";
+	model = "Romhack";
+
+	wifi0 {
+		compatible = "espressif,esp32-wifi-pinned";
+	};
+
+
+	gpio0 {
+		compatible = "espressif,esp32-gpio";
+		gpio-count = <49>;
+	};
+
+	adc1: adc1 {
+		compatible = "espressif,esp32-adc-oneshot";
+		unit-id = <ADC_UNIT_1>;
+		clk-src = <ADC_RTC_CLK_SRC_DEFAULT>;
+		channels = <ADC_CHANNEL_5 ADC_ATTEN_DB_2_5 ADC_BITWIDTH_DEFAULT>;
+	};
+
+	battery-sense {
+		compatible = "battery-sense";
+		io-channel = <&adc1 0>;
+		reference-voltage-mv = <1250>;
+		multiplier = <4252>;
+	};
+
+	display_backlight_pwm {
+		compatible = "espressif,esp32-pwm-ledc";
+		pin = <&gpio0 21 GPIO_FLAG_NONE>;
+		period-ns = <33333>;
+		ledc-timer = <0>;
+		ledc-channel = <0>;
+	};
+
+	display_backlight {
+		compatible = "pwm-backlight";
+		// enabled after drawing splash
+		status = "disabled";
+		pwm = <&display_backlight_pwm>;
+	};
+
+	i2s0: i2s0 {
+		compatible = "espressif,esp32-i2s";
+		port = <I2S_NUM_0>;
+		pin-mclk = <&gpio0 10 GPIO_FLAG_NONE>;
+		pin-bclk = <&gpio0 43 GPIO_FLAG_NONE>;
+		pin-ws = <&gpio0 46 GPIO_FLAG_NONE>;
+		pin-data-out = <&gpio0 45 GPIO_FLAG_NONE>;
+	};
+
+	i2c_internal {
+		compatible = "espressif,esp32-i2c";
+		port = <I2C_NUM_0>;
+		clock-frequency = <400000>;
+		pin-sda = <&gpio0 17 GPIO_FLAG_NONE>;
+		pin-scl = <&gpio0 16 GPIO_FLAG_NONE>;
+
+		aw9523b: aw9523b {
+			compatible = "awinic,aw9523b";
+			reg = <0x58>;
+		};
+
+		es8156: es8156 {
+			compatible = "everest,es8156";
+			status = "okay";
+			reg = <0x08>;
+			i2s = <&i2s0>;
+		};
+	};
+
+	boost5v: boost5v {
+		compatible = "romhack,power-rail";
+		pin = <&aw9523b 10 GPIO_FLAG_NONE>;
+		startup-delay-us = <2000>;
+	};
+
+	neopixel_power {
+		compatible = "romhack,power-rail";
+		pin = <&aw9523b 15 GPIO_FLAG_NONE>;
+		supply = <&boost5v>;
+	};
+
+	speaker_power {
+		compatible = "romhack,power-rail";
+		pin = <&aw9523b 7 GPIO_FLAG_ACTIVE_LOW>;
+		supply = <&boost5v>;
+	};
+
+	rfid_power: rfid_power {
+		compatible = "romhack,power-rail";
+		pin = <&aw9523b 12 GPIO_FLAG_NONE>;
+		startup-delay-us = <50000>;
+		min-off-time-us = <10000>;
+	};
+
+	keypad {
+		compatible = "romhack,keypad";
+	};
+
+
+	spi0 {
+		compatible = "espressif,esp32-spi";
+		host = <SPI2_HOST>;
+		cs-gpios = <&gpio0 15 GPIO_FLAG_NONE>, <&gpio0 44 GPIO_FLAG_NONE>;
+		pin-mosi = <&gpio0 11 GPIO_FLAG_NONE>;
+		pin-miso = <&gpio0 13 GPIO_FLAG_NONE>;
+		pin-sclk = <&gpio0 12 GPIO_FLAG_NONE>;
+
+		display@0 {
+			compatible = "ilitek,ili9341";
+			status = "okay";
+			horizontal-resolution = <320>;
+			vertical-resolution = <240>;
+			swap-xy;
+			mirror-x;
+			mirror-y;
+			bgr-order;
+			pixel-clock-hz = <60000000>;
+			pin-dc = <&gpio0 9 GPIO_FLAG_NONE>;
+			pin-reset = <&aw9523b 14 GPIO_FLAG_NONE>;
+			backlight = <&display_backlight>;
+		};
+
+		rfid@1 {
+			compatible = "nxp,mfrc522";
+			status = "disabled";
+			supply = <&rfid_power>;
+		};
+	};
+
+
+
+	sdmmc0 {
+		compatible = "espressif,esp32-sdmmc";
+		slot = <SDMMC_HOST_SLOT_1>;
+		pin-clk = <&gpio0 4 GPIO_FLAG_NONE>;
+		pin-cmd = <&gpio0 5 GPIO_FLAG_NONE>;
+		pin-d0 = <&gpio0 7 GPIO_FLAG_NONE>;
+		pin-cd = <&aw9523b 11 GPIO_FLAG_NONE>;
+		bus-width = <1>;
+		pullups;
+	};
+
+
+};

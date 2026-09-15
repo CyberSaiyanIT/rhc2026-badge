@@ -1,0 +1,122 @@
+# Kconfig file for Tactility example app
+menu "Tactility App"
+    config TT_DEVICE_NAME
+        string "Device Name"
+        default ""
+        help
+            Human-readable device name, including vendor (e.g. "M5Stack Cardputer")
+    config TT_DEVICE_NAME_SIMPLE
+        string "Device Name (simple)"
+        default ""
+        help
+            Human-readable simple device name, excluding vendor (e.g. "Cardputer")
+     config TT_DEVICE_VENDOR
+         string "Device Vendor Name"
+         default ""
+         help
+             Human-readable device vendor name (e.g. "LilyGO")
+     config TT_DEVICE_ID
+        string "Device Identifier"
+        default ""
+        help
+            The name of the directory in Devices/
+            See https://docs.tactilityproject.org for formatting guidance.
+    config TT_LAUNCHER_APP_ID
+        string "Launcher App ID"
+        default "tactility.launcher"
+        help
+            The applications that gives access to other application.
+            This is the first thing that starts after the boot screen.
+            The user can override it with a boot.properties file
+    config TT_LVGL_FONT_SIZE_SMALL
+        int "Small font size"
+        default 10
+        range 8 200
+        help
+            Small font size in pixels
+    config TT_LVGL_FONT_SIZE_DEFAULT
+        int "Default font size"
+        default 14
+        range 8 200
+        help
+            Default font size in pixels
+    config TT_LVGL_FONT_SIZE_LARGE
+        int "Large font size"
+        default 18
+        range 8 200
+        help
+            Large font size in pixels
+    config TT_LVGL_STATUSBAR_ICON_SIZE
+        int "Statusbar icon size"
+        default 20
+        range 0 200
+        help
+            Statusbar icon size in pixels
+    config TT_LVGL_LAUNCHER_ICON_SIZE
+        int "Launcher icon size"
+        default 20
+        range 0 200
+        help
+            Launcher icon size in pixels
+    config TT_LVGL_SHARED_ICON_SIZE
+        int "Shared icon size"
+        default 16
+        range 0 200
+        help
+            Shared icon size in pixels
+    config TT_AUTO_START_APP_ID
+        string "Auto Start App ID"
+        default ""
+        help
+            An application that gets automatically started from the launcher application.
+            This is optional and can be left empty.
+            The user can override it from a boot.properties file.
+    # T-Deck device-related code was directly referenced from Tactility in a pull request.
+    # This breaks other devices because the code does not exist in those implementations.
+    # Until we move it out into a proper driver, we have to have pre-processor definition for that.
+    config TT_TDECK_WORKAROUND
+        bool "Temporary work-around until we fix the T-Deck keyboard and trackball settings"
+        default n
+    choice TT_USER_DATA_LOCATION
+        prompt "User Data Location"
+        default TT_USER_DATA_LOCATION_INTERNAL
+        help
+            Where user data is stored on this device.
+            "Internal Flash" assumes /data always exists.
+            "SD Card" looks for the first mounted SD card at runtime and requires one to be present.
+        config TT_USER_DATA_LOCATION_SD
+            bool "SD Card"
+        config TT_USER_DATA_LOCATION_INTERNAL
+            bool "Internal Flash"
+    endchoice
+    config TT_SPLASH_DURATION
+       int "Splash Duration (ms)"
+       default 1000
+       range 0 3000
+       help
+           The minimum time to show the splash screen in milliseconds.
+           When set to 0, startup will continue to desktop as soon as boot operations are finished.
+    config TT_LVGL_DRAW_BUFFER_DIVISOR
+       int "LVGL draw buffer height divisor"
+       default 10
+       range 1 20
+       help
+           Draw buffer height as a fraction of the display's vertical resolution. A dirty region
+           taller than the buffer is split into several render+flush rounds, each reaching the
+           panel as its own transfer, so a smaller divisor trades RAM for fewer visible steps.
+           10 is the historical value. The buffers are internal DMA-capable RAM unless the
+           display reports DISPLAY_CAPABILITY_PREFER_EXTERNAL_RAM.
+    config TT_EARLY_SPLASH
+       bool "Draw a device-provided splash straight to the panel before LVGL starts"
+       default n
+       help
+           The device project must provide romhack_draw_early_splash(). It runs right after
+           kernel_init(), so it cannot read the filesystem and must carry its own artwork.
+    config TT_TOUCH_CALIBRATION_SUPPORTED
+        bool "Set true when a touch screen calibration app should be included"
+        default n
+    config TT_TOUCH_CALIBRATION_REQUIRED
+        bool "Set true when a touch screen calibration is required before the device is usable"
+        default n
+        depends on TT_TOUCH_CALIBRATION_SUPPORTED
+endmenu

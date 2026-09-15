@@ -1,0 +1,8 @@
+description: Represents root node of a device tree. It holds all other nodes.
+
+compatible: "root"
+
+properties:
+  model:
+    required: true
+    description: the name of hardware, usually vendor and model name

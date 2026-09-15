@@ -1,0 +1,19 @@
+description: GPIO-switched supply rail, optionally fed by another rail
+
+compatible: "romhack,power-rail"
+
+properties:
+  pin:
+    type: phandles
+    required: true
+    description: Output pin that switches this rail on
+  supply:
+    type: phandle
+    default: "NULL"
+    description: Rail that feeds this one, if any
+  startup-delay-us:
+    type: int
+    default: 0
+  min-off-time-us:
+    type: int
+    default: 0

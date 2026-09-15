@@ -1,0 +1,535 @@
+#ifdef ESP_PLATFORM
+#include <sdkconfig.h>
+#endif
+
+#if defined(CONFIG_BT_NIMBLE_ENABLED)
+
+#include <bluetooth/esp32_ble_internal.h>
+
+#include <host/ble_gap.h>
+#include <host/ble_gatt.h>
+#include <host/ble_hs_mbuf.h>
+#include <services/gap/ble_svc_gap.h>
+#include <services/gatt/ble_svc_gatt.h>
+#include <tactility/drivers/hid_report_descriptors.h>
+
+#include <cstring>
+
+constexpr auto* TAG = "esp32_ble_hid";
+#include <tactility/device.h>
+#include <tactility/driver.h>
+#include <tactility/log.h>
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+
+// ---- HID device context (stored as driver data of the HID device child) ----
+
+#include <atomic>
+
+struct BleHidDeviceCtx {
+    std::atomic<uint16_t> hid_conn_handle;
+};
+
+// ---- Module globals ----
+
+BleHidProfile current_hid_profile = BleHidProfile::None;
+uint16_t hid_appearance = 0x03C1; // Keyboard (default)
+const uint8_t* active_hid_rpt_map    = nullptr;
+size_t         active_hid_rpt_map_len = 0;
+
+// GATT attribute handles — written by NimBLE via val_handle pointers below.
+uint16_t hid_kb_input_handle;
+uint16_t hid_consumer_input_handle;
+uint16_t hid_mouse_input_handle;
+uint16_t hid_gamepad_input_handle;
+
+// ---- Static UUID objects for HID 16-bit UUIDs ----
+
+static const ble_uuid16_t UUID16_RPT_REF    = BLE_UUID16_INIT(0x2908);
+static const ble_uuid16_t UUID16_HID_INFO   = BLE_UUID16_INIT(0x2A4A);
+static const ble_uuid16_t UUID16_RPT_MAP    = BLE_UUID16_INIT(0x2A4B);
+static const ble_uuid16_t UUID16_HID_CTRL   = BLE_UUID16_INIT(0x2A4C);
+static const ble_uuid16_t UUID16_HID_REPORT = BLE_UUID16_INIT(0x2A4D);
+static const ble_uuid16_t UUID16_PROTO_MODE = BLE_UUID16_INIT(0x2A4E);
+static const ble_uuid16_t UUID16_HID_SVC    = BLE_UUID16_INIT(0x1812);
+
+static uint8_t hid_protocol_mode = 0x01; // 0x00=Boot, 0x01=Report
+
+// ============================================================================
+// Per-profile HID Report Maps
+// ============================================================================
+//
+// Shared with esp32_usb_hid_device.cpp - see hid_report_descriptors.h for the byte tables
+// (report ID scheme, per-field layout) - HID report descriptors are transport-independent
+// so the same bytes apply verbatim whether carried over USB or BLE GATT.
+
+// ---- Per-profile Report Reference descriptor data ----
+// Format: {Report ID, Report Type} — Type: 1=Input, 2=Output
+
+static const uint8_t rpt_ref_kbc_kb_in[2]  = {1, 1};
+static const uint8_t rpt_ref_kbc_cs_in[2]  = {2, 1};
+static const uint8_t rpt_ref_kbc_kb_out[2] = {1, 2};
+static const uint8_t rpt_ref_ms_in[2]      = {1, 1};
+static const uint8_t rpt_ref_kbm_kb_in[2]  = {1, 1};
+static const uint8_t rpt_ref_kbm_cs_in[2]  = {2, 1};
+static const uint8_t rpt_ref_kbm_ms_in[2]  = {3, 1};
+static const uint8_t rpt_ref_kbm_kb_out[2] = {1, 2};
+static const uint8_t rpt_ref_gp_in[2]      = {1, 1};
+
+// ---- HID GATT callbacks ----
+
+static int hid_dsc_access(uint16_t /*conn_handle*/, uint16_t /*attr_handle*/,
+                          struct ble_gatt_access_ctxt* ctxt, void* arg) {
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_DSC) {
+        const uint8_t* data = (const uint8_t*)arg;
+        int rc = os_mbuf_append(ctxt->om, data, 2);
+        return (rc == 0) ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+
+static int hid_chr_access(uint16_t /*conn_handle*/, uint16_t attr_handle,
+                          struct ble_gatt_access_ctxt* ctxt, void* /*arg*/) {
+    uint16_t uuid16 = ble_uuid_u16(ctxt->chr->uuid);
+
+    switch (ctxt->op) {
+        case BLE_GATT_ACCESS_OP_READ_CHR: {
+            if (uuid16 == 0x2A4A) {
+                static const uint8_t hid_info[4] = { 0x11, 0x01, 0x00, 0x02 };
+                int rc = os_mbuf_append(ctxt->om, hid_info, sizeof(hid_info));
+                return (rc == 0) ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+            }
+            if (uuid16 == 0x2A4B) {
+                if (active_hid_rpt_map == nullptr || active_hid_rpt_map_len == 0)
+                    return BLE_ATT_ERR_UNLIKELY;
+                int rc = os_mbuf_append(ctxt->om, active_hid_rpt_map, active_hid_rpt_map_len);
+                return (rc == 0) ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+            }
+            if (uuid16 == 0x2A4E) {
+                int rc = os_mbuf_append(ctxt->om, &hid_protocol_mode, 1);
+                return (rc == 0) ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+            }
+            if (uuid16 == 0x2A4D) {
+                static const uint8_t zeros[8] = {};
+                size_t report_len = 8;
+                if (attr_handle == hid_consumer_input_handle) report_len = 2;
+                else if (attr_handle == hid_mouse_input_handle) report_len = 4;
+                else if (attr_handle == hid_gamepad_input_handle) report_len = 8;
+                int rc = os_mbuf_append(ctxt->om, zeros, report_len);
+                return (rc == 0) ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+            }
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+
+        case BLE_GATT_ACCESS_OP_WRITE_CHR: {
+            if (uuid16 == 0x2A4C) return 0; // HID Control Point — no action
+            if (uuid16 == 0x2A4E) {
+                if (OS_MBUF_PKTLEN(ctxt->om) >= 1) {
+                    os_mbuf_copydata(ctxt->om, 0, 1, &hid_protocol_mode);
+                    LOG_I(TAG, "Protocol Mode -> %u", hid_protocol_mode);
+                }
+                return 0;
+            }
+            if (uuid16 == 0x2A4D) {
+                if (OS_MBUF_PKTLEN(ctxt->om) >= 1) {
+                    uint8_t leds = 0;
+                    os_mbuf_copydata(ctxt->om, 0, 1, &leds);
+                    LOG_I(TAG, "KB LED state: 0x%02x", leds);
+                }
+                return 0;
+            }
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+
+        default:
+            return BLE_ATT_ERR_UNLIKELY;
+    }
+}
+
+// ---- Per-profile HID descriptor arrays ----
+
+static struct ble_gatt_dsc_def hid_kbc_kb_dscs[]  = { { .uuid = &UUID16_RPT_REF.u, .att_flags = BLE_ATT_F_READ, .access_cb = hid_dsc_access, .arg = (void*)rpt_ref_kbc_kb_in  }, { 0 } };
+static struct ble_gatt_dsc_def hid_kbc_cs_dscs[]  = { { .uuid = &UUID16_RPT_REF.u, .att_flags = BLE_ATT_F_READ, .access_cb = hid_dsc_access, .arg = (void*)rpt_ref_kbc_cs_in  }, { 0 } };
+static struct ble_gatt_dsc_def hid_kbc_out_dscs[] = { { .uuid = &UUID16_RPT_REF.u, .att_flags = BLE_ATT_F_READ, .access_cb = hid_dsc_access, .arg = (void*)rpt_ref_kbc_kb_out }, { 0 } };
+static struct ble_gatt_dsc_def hid_ms_dscs[]      = { { .uuid = &UUID16_RPT_REF.u, .att_flags = BLE_ATT_F_READ, .access_cb = hid_dsc_access, .arg = (void*)rpt_ref_ms_in      }, { 0 } };
+static struct ble_gatt_dsc_def hid_kbm_kb_dscs[]  = { { .uuid = &UUID16_RPT_REF.u, .att_flags = BLE_ATT_F_READ, .access_cb = hid_dsc_access, .arg = (void*)rpt_ref_kbm_kb_in  }, { 0 } };
+static struct ble_gatt_dsc_def hid_kbm_cs_dscs[]  = { { .uuid = &UUID16_RPT_REF.u, .att_flags = BLE_ATT_F_READ, .access_cb = hid_dsc_access, .arg = (void*)rpt_ref_kbm_cs_in  }, { 0 } };
+static struct ble_gatt_dsc_def hid_kbm_ms_dscs[]  = { { .uuid = &UUID16_RPT_REF.u, .att_flags = BLE_ATT_F_READ, .access_cb = hid_dsc_access, .arg = (void*)rpt_ref_kbm_ms_in  }, { 0 } };
+static struct ble_gatt_dsc_def hid_kbm_out_dscs[] = { { .uuid = &UUID16_RPT_REF.u, .att_flags = BLE_ATT_F_READ, .access_cb = hid_dsc_access, .arg = (void*)rpt_ref_kbm_kb_out }, { 0 } };
+static struct ble_gatt_dsc_def hid_gp_dscs[]      = { { .uuid = &UUID16_RPT_REF.u, .att_flags = BLE_ATT_F_READ, .access_cb = hid_dsc_access, .arg = (void*)rpt_ref_gp_in      }, { 0 } };
+
+// ---- Per-profile HID characteristic arrays ----
+
+static struct ble_gatt_chr_def hid_chars_kb_consumer[] = {
+    { .uuid = &UUID16_HID_INFO.u,   .access_cb = hid_chr_access, .flags = BLE_GATT_CHR_F_READ },
+    { .uuid = &UUID16_RPT_MAP.u,    .access_cb = hid_chr_access, .flags = BLE_GATT_CHR_F_READ },
+    { .uuid = &UUID16_HID_CTRL.u,   .access_cb = hid_chr_access, .flags = BLE_GATT_CHR_F_WRITE_NO_RSP },
+    { .uuid = &UUID16_PROTO_MODE.u, .access_cb = hid_chr_access, .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE_NO_RSP },
+    { .uuid = &UUID16_HID_REPORT.u, .access_cb = hid_chr_access, .descriptors = hid_kbc_kb_dscs,
+      .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY, .val_handle = &hid_kb_input_handle },
+    { .uuid = &UUID16_HID_REPORT.u, .access_cb = hid_chr_access, .descriptors = hid_kbc_cs_dscs,
+      .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY, .val_handle = &hid_consumer_input_handle },
+    { .uuid = &UUID16_HID_REPORT.u, .access_cb = hid_chr_access, .descriptors = hid_kbc_out_dscs,
+      .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP },
+    { 0 }
+};
+
+static struct ble_gatt_chr_def hid_chars_mouse[] = {
+    { .uuid = &UUID16_HID_INFO.u,   .access_cb = hid_chr_access, .flags = BLE_GATT_CHR_F_READ },
+    { .uuid = &UUID16_RPT_MAP.u,    .access_cb = hid_chr_access, .flags = BLE_GATT_CHR_F_READ },
+    { .uuid = &UUID16_HID_CTRL.u,   .access_cb = hid_chr_access, .flags = BLE_GATT_CHR_F_WRITE_NO_RSP },
+    { .uuid = &UUID16_PROTO_MODE.u, .access_cb = hid_chr_access, .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE_NO_RSP },
+    { .uuid = &UUID16_HID_REPORT.u, .access_cb = hid_chr_access, .descriptors = hid_ms_dscs,
+      .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY, .val_handle = &hid_mouse_input_handle },
+    { 0 }
+};
+
+static struct ble_gatt_chr_def hid_chars_kb_mouse[] = {
+    { .uuid = &UUID16_HID_INFO.u,   .access_cb = hid_chr_access, .flags = BLE_GATT_CHR_F_READ },
+    { .uuid = &UUID16_RPT_MAP.u,    .access_cb = hid_chr_access, .flags = BLE_GATT_CHR_F_READ },
+    { .uuid = &UUID16_HID_CTRL.u,   .access_cb = hid_chr_access, .flags = BLE_GATT_CHR_F_WRITE_NO_RSP },
+    { .uuid = &UUID16_PROTO_MODE.u, .access_cb = hid_chr_access, .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE_NO_RSP },
+    { .uuid = &UUID16_HID_REPORT.u, .access_cb = hid_chr_access, .descriptors = hid_kbm_kb_dscs,
+      .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY, .val_handle = &hid_kb_input_handle },
+    { .uuid = &UUID16_HID_REPORT.u, .access_cb = hid_chr_access, .descriptors = hid_kbm_cs_dscs,
+      .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY, .val_handle = &hid_consumer_input_handle },
+    { .uuid = &UUID16_HID_REPORT.u, .access_cb = hid_chr_access, .descriptors = hid_kbm_ms_dscs,
+      .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY, .val_handle = &hid_mouse_input_handle },
+    { .uuid = &UUID16_HID_REPORT.u, .access_cb = hid_chr_access, .descriptors = hid_kbm_out_dscs,
+      .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP },
+    { 0 }
+};
+
+static struct ble_gatt_chr_def hid_chars_gamepad[] = {
+    { .uuid = &UUID16_HID_INFO.u,   .access_cb = hid_chr_access, .flags = BLE_GATT_CHR_F_READ },
+    { .uuid = &UUID16_RPT_MAP.u,    .access_cb = hid_chr_access, .flags = BLE_GATT_CHR_F_READ },
+    { .uuid = &UUID16_HID_CTRL.u,   .access_cb = hid_chr_access, .flags = BLE_GATT_CHR_F_WRITE_NO_RSP },
+    { .uuid = &UUID16_PROTO_MODE.u, .access_cb = hid_chr_access, .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE_NO_RSP },
+    { .uuid = &UUID16_HID_REPORT.u, .access_cb = hid_chr_access, .descriptors = hid_gp_dscs,
+      .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY, .val_handle = &hid_gamepad_input_handle },
+    { 0 }
+};
+
+// ---- Per-profile GATT service arrays ----
+
+static const struct ble_gatt_svc_def gatt_svcs_none[] = {
+    { .type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = &NUS_SVC_UUID.u,  .characteristics = nus_chars_with_handle },
+    { .type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = &MIDI_SVC_UUID.u, .characteristics = midi_chars },
+    { 0 }
+};
+static const struct ble_gatt_svc_def gatt_svcs_kb_consumer[] = {
+    { .type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = &NUS_SVC_UUID.u,   .characteristics = nus_chars_with_handle },
+    { .type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = &MIDI_SVC_UUID.u,  .characteristics = midi_chars },
+    { .type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = &UUID16_HID_SVC.u, .characteristics = hid_chars_kb_consumer },
+    { 0 }
+};
+static const struct ble_gatt_svc_def gatt_svcs_mouse[] = {
+    { .type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = &NUS_SVC_UUID.u,   .characteristics = nus_chars_with_handle },
+    { .type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = &MIDI_SVC_UUID.u,  .characteristics = midi_chars },
+    { .type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = &UUID16_HID_SVC.u, .characteristics = hid_chars_mouse },
+    { 0 }
+};
+static const struct ble_gatt_svc_def gatt_svcs_kb_mouse[] = {
+    { .type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = &NUS_SVC_UUID.u,   .characteristics = nus_chars_with_handle },
+    { .type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = &MIDI_SVC_UUID.u,  .characteristics = midi_chars },
+    { .type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = &UUID16_HID_SVC.u, .characteristics = hid_chars_kb_mouse },
+    { 0 }
+};
+static const struct ble_gatt_svc_def gatt_svcs_gamepad[] = {
+    { .type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = &NUS_SVC_UUID.u,   .characteristics = nus_chars_with_handle },
+    { .type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = &MIDI_SVC_UUID.u,  .characteristics = midi_chars },
+    { .type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = &UUID16_HID_SVC.u, .characteristics = hid_chars_gamepad },
+    { 0 }
+};
+
+// ---- HID field accessor implementations ----
+
+static BleCtx* hid_root_ctx(struct Device* device) {
+    return ble_get_ctx(device);
+}
+
+bool ble_hid_get_active(struct Device* device) {
+    return hid_root_ctx(device)->hid_active.load();
+}
+void ble_hid_set_active(struct Device* device, bool v) {
+    hid_root_ctx(device)->hid_active.store(v);
+}
+uint16_t ble_hid_get_conn_handle(struct Device* device) {
+    if (device == nullptr) return (uint16_t)BLE_HS_CONN_HANDLE_NONE;
+    BleHidDeviceCtx* hid_ctx = (BleHidDeviceCtx*)device_get_driver_data(device);
+    return hid_ctx ? hid_ctx->hid_conn_handle.load() : (uint16_t)BLE_HS_CONN_HANDLE_NONE;
+}
+void ble_hid_set_conn_handle(struct Device* device, uint16_t h) {
+    if (device == nullptr) return;
+    BleHidDeviceCtx* hid_ctx = (BleHidDeviceCtx*)device_get_driver_data(device);
+    if (hid_ctx) hid_ctx->hid_conn_handle.store(h);
+}
+
+// ---- GATT profile switch ----
+// device must be the HID device child Device*.
+
+bool ble_hid_switch_profile(struct Device* device, BleHidProfile profile) {
+    if (profile == current_hid_profile) return true;
+    LOG_I(TAG, "switchGattProfile: %d -> %d", (int)current_hid_profile, (int)profile);
+
+    ble_gap_adv_stop();
+
+    BleHidDeviceCtx* hid_ctx = (BleHidDeviceCtx*)device_get_driver_data(device);
+    if (hid_ctx && hid_ctx->hid_conn_handle.load() != BLE_HS_CONN_HANDLE_NONE) {
+        ble_gap_terminate(hid_ctx->hid_conn_handle.load(), BLE_ERR_REM_USER_CONN_TERM);
+        hid_ctx->hid_conn_handle.store(BLE_HS_CONN_HANDLE_NONE);
+    }
+
+    ble_gatts_reset();
+    ble_svc_gap_init();
+    ble_svc_gatt_init();
+
+    const struct ble_gatt_svc_def* svcs = gatt_svcs_none;
+    const uint8_t* new_rpt_map     = nullptr;
+    size_t         new_rpt_map_len = 0;
+    switch (profile) {
+        case BleHidProfile::KbConsumer: svcs = gatt_svcs_kb_consumer; new_rpt_map = hid_report_map_keyboard_consumer;      new_rpt_map_len = hid_report_map_keyboard_consumer_len;      break;
+        case BleHidProfile::Mouse:      svcs = gatt_svcs_mouse;        new_rpt_map = hid_report_map_mouse;                   new_rpt_map_len = hid_report_map_mouse_len;                   break;
+        case BleHidProfile::KbMouse:    svcs = gatt_svcs_kb_mouse;     new_rpt_map = hid_report_map_keyboard_consumer_mouse; new_rpt_map_len = hid_report_map_keyboard_consumer_mouse_len; break;
+        case BleHidProfile::Gamepad:    svcs = gatt_svcs_gamepad;      new_rpt_map = hid_report_map_gamepad;                 new_rpt_map_len = hid_report_map_gamepad_len;                 break;
+        default:                        svcs = gatt_svcs_none;                                                                                                      break;
+    }
+
+    int rc = ble_gatts_count_cfg(svcs);
+    if (rc == 0) {
+        rc = ble_gatts_add_svcs(svcs);
+        if (rc != 0) {
+            LOG_E(TAG, "switchGattProfile: gatts_add_svcs failed rc=%d", rc);
+            return false; // don't update profile — GATT state is inconsistent
+        }
+    } else {
+        LOG_E(TAG, "switchGattProfile: gatts_count_cfg failed rc=%d", rc);
+        return false;
+    }
+
+    // ble_gatts_add_svcs() only adds definitions to a pending list.
+    // ble_gatts_start() converts them into live ATT entries.
+    // Without this call, all GATT reads return ATT errors and Windows
+    // cannot install the HID driver → Phase 2 reconnect never occurs.
+    rc = ble_gatts_start();
+    if (rc != 0) {
+        LOG_E(TAG, "switchGattProfile: gatts_start failed rc=%d", rc);
+        return false;
+    }
+
+    active_hid_rpt_map     = new_rpt_map;
+    active_hid_rpt_map_len = new_rpt_map_len;
+
+    ble_svc_gap_device_name_set(CONFIG_TT_DEVICE_NAME);
+    ble_att_set_preferred_mtu(BLE_ATT_MTU_MAX);
+    // Do NOT call ble_svc_gatt_changed(0, 0xFFFF) here.
+    // switchGattProfile() is always called while disconnected (ble_gatts_mutable()
+    // requires no active connection). ble_gatts_chr_updated() would persist a
+    // "value_changed=1" flag in NVS for every bonded-but-disconnected peer.
+    // When a bonded peer (e.g. Windows HID host) reconnects, NimBLE immediately
+    // sends a Service Changed indication; Windows disconnects to re-discover GATT
+    // without ACKing the indication; NimBLE re-sends on the next reconnect → loop.
+    // GATT handles are deterministic (same registration order each time), so
+    // bonded peers can reuse their cached handles and no indication is needed.
+
+    current_hid_profile = profile;
+    return true;
+}
+
+void ble_hid_init_gatt() {
+    current_hid_profile    = BleHidProfile::None;
+    active_hid_rpt_map     = nullptr;
+    active_hid_rpt_map_len = 0;
+    int rc = ble_gatts_count_cfg(gatt_svcs_none);
+    if (rc != 0) {
+        LOG_E(TAG, "gatts_count_cfg failed (rc=%d)", rc);
+    } else {
+        rc = ble_gatts_add_svcs(gatt_svcs_none);
+        if (rc != 0) {
+            LOG_E(TAG, "gatts_add_svcs failed (rc=%d)", rc);
+        }
+    }
+}
+
+// ---- HID Device sub-API implementations ----
+// All functions receive the HID device child Device* and operate on BleHidDeviceCtx
+// stored as its driver data.
+
+static error_t hid_device_start(struct Device* device, enum BtHidDeviceMode mode) {
+    // Clean up any leftover context from a previous session (e.g. BLE was disabled
+    // while connected: dispatch_disable() skips the normal hid_device_stop cleanup).
+    BleHidDeviceCtx* old_ctx = (BleHidDeviceCtx*)device_get_driver_data(device);
+    delete old_ctx; // no-op if nullptr
+    // Create driver data for this HID session.
+    BleHidDeviceCtx* hid_ctx = new BleHidDeviceCtx();
+    hid_ctx->hid_conn_handle.store(BLE_HS_CONN_HANDLE_NONE);
+    device_set_driver_data(device, hid_ctx);
+
+    BleHidProfile profile;
+    uint16_t appearance;
+    switch (mode) {
+        case BT_HID_DEVICE_MODE_MOUSE:
+            profile    = BleHidProfile::Mouse;
+            appearance = 0x03C2;
+            break;
+        case BT_HID_DEVICE_MODE_KEYBOARD_MOUSE:
+            profile    = BleHidProfile::KbMouse;
+            appearance = 0x03C0;
+            break;
+        case BT_HID_DEVICE_MODE_GAMEPAD:
+            profile    = BleHidProfile::Gamepad;
+            appearance = 0x03C4;
+            break;
+        default: // BT_HID_DEVICE_MODE_KEYBOARD
+            profile    = BleHidProfile::KbConsumer;
+            appearance = 0x03C1;
+            break;
+    }
+
+    hid_appearance = appearance;
+    // gap_mutex (not radio_mutex - see BleCtx::gap_mutex's comment) serializes this GAP/GATT
+    // sequence against on_sync()'s own advertising decision and spp/midi's start/stop.
+    BleCtx* root_ctx = ble_get_ctx(device);
+    xSemaphoreTake(root_ctx->gap_mutex, portMAX_DELAY);
+    bool switched = ble_hid_switch_profile(device, profile);
+    if (switched) {
+        ble_hid_set_active(device, true);
+        ble_start_advertising_hid(device, hid_appearance);
+    }
+    xSemaphoreGive(root_ctx->gap_mutex);
+    if (!switched) {
+        delete (BleHidDeviceCtx*)device_get_driver_data(device);
+        device_set_driver_data(device, nullptr);
+        return ERROR_INVALID_STATE;
+    }
+    return ERROR_NONE;
+}
+
+static error_t hid_device_stop(struct Device* device) {
+    BleCtx* root_ctx = ble_get_ctx(device);
+    xSemaphoreTake(root_ctx->gap_mutex, portMAX_DELAY);
+    ble_hid_set_active(device, false);
+    ble_gap_adv_stop();
+    BleHidDeviceCtx* hid_ctx = (BleHidDeviceCtx*)device_get_driver_data(device);
+    uint16_t conn = hid_ctx ? hid_ctx->hid_conn_handle.load() : (uint16_t)BLE_HS_CONN_HANDLE_NONE;
+    if (conn != BLE_HS_CONN_HANDLE_NONE) {
+        // Connected: terminate and let the DISCONNECT handler switch profile to None.
+        // ble_gatts_mutable() returns false while a connection is live, so calling
+        // switch_profile here would assert inside ble_svc_gap_init().
+        ble_gap_terminate(conn, BLE_ERR_REM_USER_CONN_TERM);
+        // Do NOT clear hid_conn_handle or delete hid_ctx:
+        // the DISCONNECT handler in esp32_ble.cpp uses hid_conn_handle for was_hid detection.
+        // esp32_ble_hid_device_stop_device() (device lifecycle) will free hid_ctx later.
+    } else {
+        // Not connected: GATT is mutable, switch profile immediately.
+        if (current_hid_profile != BleHidProfile::None) {
+            if (!ble_hid_switch_profile(device, BleHidProfile::None)) {
+                LOG_E(TAG, "hid_device_stop: switch to None failed — GATT state inconsistent");
+            }
+        }
+        delete hid_ctx;
+        device_set_driver_data(device, nullptr);
+    }
+    xSemaphoreGive(root_ctx->gap_mutex);
+    return ERROR_NONE;
+}
+
+static error_t hid_device_send_key(struct Device* device, uint8_t keycode, bool pressed) {
+    BleHidDeviceCtx* hid_ctx = (BleHidDeviceCtx*)device_get_driver_data(device);
+    if (hid_ctx == nullptr || hid_ctx->hid_conn_handle.load() == BLE_HS_CONN_HANDLE_NONE) {
+        return ERROR_INVALID_STATE;
+    }
+    uint8_t report[8] = {};
+    if (pressed) report[2] = keycode;
+    struct os_mbuf* om = ble_hs_mbuf_from_flat(report, sizeof(report));
+    if (om == nullptr) return ERROR_INVALID_STATE;
+    int rc = ble_gatts_notify_custom(hid_ctx->hid_conn_handle.load(), hid_kb_input_handle, om);
+    if (rc != 0) os_mbuf_free_chain(om);
+    return (rc == 0) ? ERROR_NONE : ERROR_INVALID_STATE;
+}
+
+static error_t hid_notify(uint16_t conn_handle, uint16_t attr_handle,
+                           const uint8_t* data, size_t len) {
+    if (conn_handle == BLE_HS_CONN_HANDLE_NONE) return ERROR_INVALID_STATE;
+    if (attr_handle == 0) return ERROR_INVALID_STATE; // handle not registered for current profile
+    struct os_mbuf* om = ble_hs_mbuf_from_flat(data, len);
+    if (om == nullptr) return ERROR_INVALID_STATE;
+    int rc = ble_gatts_notify_custom(conn_handle, attr_handle, om);
+    if (rc != 0) os_mbuf_free_chain(om);
+    return (rc == 0) ? ERROR_NONE : ERROR_INVALID_STATE;
+}
+
+static error_t hid_device_send_keyboard(struct Device* device, const uint8_t* report, size_t len) {
+    BleHidDeviceCtx* hid_ctx = (BleHidDeviceCtx*)device_get_driver_data(device);
+    if (hid_ctx == nullptr) return ERROR_INVALID_STATE;
+    uint8_t buf[8] = {};
+    memcpy(buf, report, len < sizeof(buf) ? len : sizeof(buf));
+    return hid_notify(hid_ctx->hid_conn_handle.load(), hid_kb_input_handle, buf, sizeof(buf));
+}
+
+static error_t hid_device_send_consumer(struct Device* device, const uint8_t* report, size_t len) {
+    BleHidDeviceCtx* hid_ctx = (BleHidDeviceCtx*)device_get_driver_data(device);
+    if (hid_ctx == nullptr) return ERROR_INVALID_STATE;
+    uint8_t buf[2] = {};
+    memcpy(buf, report, len < sizeof(buf) ? len : sizeof(buf));
+    return hid_notify(hid_ctx->hid_conn_handle.load(), hid_consumer_input_handle, buf, sizeof(buf));
+}
+
+static error_t hid_device_send_mouse(struct Device* device, const uint8_t* report, size_t len) {
+    BleHidDeviceCtx* hid_ctx = (BleHidDeviceCtx*)device_get_driver_data(device);
+    if (hid_ctx == nullptr) return ERROR_INVALID_STATE;
+    uint8_t buf[4] = {};
+    memcpy(buf, report, len < sizeof(buf) ? len : sizeof(buf));
+    return hid_notify(hid_ctx->hid_conn_handle.load(), hid_mouse_input_handle, buf, sizeof(buf));
+}
+
+static error_t hid_device_send_gamepad(struct Device* device, const uint8_t* report, size_t len) {
+    BleHidDeviceCtx* hid_ctx = (BleHidDeviceCtx*)device_get_driver_data(device);
+    if (hid_ctx == nullptr) return ERROR_INVALID_STATE;
+    uint8_t buf[8] = {};
+    memcpy(buf, report, len < sizeof(buf) ? len : sizeof(buf));
+    return hid_notify(hid_ctx->hid_conn_handle.load(), hid_gamepad_input_handle, buf, sizeof(buf));
+}
+
+static bool hid_device_is_connected(struct Device* device) {
+    BleHidDeviceCtx* hid_ctx = (BleHidDeviceCtx*)device_get_driver_data(device);
+    return hid_ctx != nullptr && hid_ctx->hid_conn_handle.load() != BLE_HS_CONN_HANDLE_NONE;
+}
+
+extern const BtHidDeviceApi nimble_hid_device_api = {
+    .start         = hid_device_start,
+    .stop          = hid_device_stop,
+    .send_key      = hid_device_send_key,
+    .send_keyboard = hid_device_send_keyboard,
+    .send_consumer = hid_device_send_consumer,
+    .send_mouse    = hid_device_send_mouse,
+    .send_gamepad  = hid_device_send_gamepad,
+    .is_connected  = hid_device_is_connected,
+};
+
+// ---- HID device child driver lifecycle ----
+
+static error_t esp32_ble_hid_device_stop_device(struct Device* device) {
+    // Safety cleanup: free any BleHidDeviceCtx that was not deleted by hid_device_stop()
+    // (e.g. if the BLE device is stopped while HID is still connected).
+    BleHidDeviceCtx* hid_ctx = (BleHidDeviceCtx*)device_get_driver_data(device);
+    delete hid_ctx; // safe even if nullptr
+    device_set_driver_data(device, nullptr);
+    return ERROR_NONE;
+}
+
+Driver esp32_ble_hid_device_driver = {
+    .name         = "esp32_ble_hid_device",
+    .compatible   = nullptr,
+    .start_device = nullptr,
+    .stop_device  = esp32_ble_hid_device_stop_device,
+    .api          = &nimble_hid_device_api,
+    .device_type  = &BLUETOOTH_HID_DEVICE_TYPE,
+    .owner        = nullptr,
+    .internal     = nullptr,
+};
+
+#pragma GCC diagnostic pop
+
+#endif // CONFIG_BT_NIMBLE_ENABLED

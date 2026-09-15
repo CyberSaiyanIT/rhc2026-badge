@@ -1,0 +1,67 @@
+#pragma once
+
+#include "./State.h"
+
+#include <cstdint>
+#include <lvgl.h>
+#include <memory>
+
+namespace tt::app::files {
+
+class View final {
+    std::shared_ptr<State> state;
+    uint32_t appInstanceId = 0;
+
+    size_t current_start_index = 0;
+    size_t last_loaded_index = 0;
+    const size_t MAX_BATCH = 50;
+
+    lv_obj_t* dir_entry_list = nullptr;
+    lv_obj_t* action_list = nullptr;
+    lv_obj_t* navigate_up_button = nullptr;
+    lv_obj_t* new_file_button = nullptr;
+    lv_obj_t* new_folder_button = nullptr;
+    lv_obj_t* paste_button = nullptr;
+
+    std::string installAppPath = { 0 };
+    uint32_t installDialogId = 0;
+
+    void showActions();
+    void showActionsForDirectory();
+    void showActionsForFile();
+    void showActionsForMountPoint();
+
+    void viewFile(const std::string&path, const std::string&filename);
+    void createDirEntryWidget(lv_obj_t* parent, dirent& dir_entry);
+    void onNavigate();
+
+public:
+
+    explicit View(const std::shared_ptr<State>& state) : state(state) {}
+
+    void init(uint32_t appInstanceId, lv_obj_t* parent);
+    void update(size_t start_index = 0);
+
+    void onBackPressed();
+    void onNavigateUpPressed();
+    void onDirEntryPressed(uint32_t index);
+    void onDirEntryLongPressed(int32_t index);
+    void onRenamePressed();
+    void onDeletePressed();
+    void onNewFilePressed();
+    void onNewFolderPressed();
+    void onCopyPressed();
+    void onCutPressed();
+    void onPastePressed();
+    void onEjectPressed();
+    void onDirEntryListScrollBegin();
+    void onResult(uint32_t launchId, int32_t result);
+    void deinit();
+
+private:
+
+    bool resolveDirentFromListIndex(int32_t list_index, dirent& out_entry);
+    void doPaste(const std::string& src, bool is_cut, const std::string& dst);
+};
+
+}

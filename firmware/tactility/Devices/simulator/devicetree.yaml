@@ -1,0 +1,3 @@
+dependencies:
+  - Platforms/platform-posix
+dts: simulator.dts

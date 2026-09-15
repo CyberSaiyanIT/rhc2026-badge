@@ -1,0 +1,416 @@
+import os.path
+from textwrap import dedent
+from source.models import *
+from .exception import DevicetreeException
+
+def write_include(file, include: IncludeC, verbose: bool):
+    if verbose:
+        print("Processing include:")
+        print(f"  {include.statement}")
+    file.write(include.statement)
+    file.write('\n')
+
+def write_define(file, define: DefineC, verbose: bool):
+    if verbose:
+        print("Processing define:")
+        print(f"  {define.statement}")
+    file.write(define.statement)
+    file.write('\n')
+
+def get_device_node_name_safe(device: Device):
+    if device.node_name == "/":
+        return "root"
+    else:
+        return device.node_name.replace("-", "_")
+
+def get_device_type_name(device: Device, bindings: list[Binding]):
+    device_binding = find_device_binding(device, bindings)
+    if device_binding is None:
+        raise DevicetreeException(f"Binding not found for {device.node_name}. Make sure that the driver name in the driver's yaml and driver code declarations matches with the device dts file.")
+    if device_binding.compatible is None:
+        raise DevicetreeException(f"Couldn't find compatible binding for {device.node_name}")
+    compatible_safe = device_binding.compatible.split(",")[-1]
+    return compatible_safe.replace("-", "_")
+
+def find_device_property(device: Device, name: str) -> DeviceProperty:
+    for property in device.properties:
+        if property.name == name:
+            return property
+    return None
+
+def find_device_binding(device: Device, bindings: list[Binding]) -> Binding:
+    compatible_property = find_device_property(device, "compatible")
+    if compatible_property is None:
+        raise DevicetreeException(f"property 'compatible' not found in device {device.node_name}")
+    for binding in bindings:
+        if binding.compatible == compatible_property.value:
+            return binding
+    return None
+
+def find_binding(compatible: str, bindings: list[Binding]) -> Binding:
+    for binding in bindings:
+        if binding.compatible == compatible:
+            return binding
+    return None
+
+def find_phandle(devices: list[Device], phandle: str):
+    for device in devices:
+        if device.node_name == phandle or device.node_alias == phandle:
+            return f"&{get_device_node_name_safe(device)}"
+    raise DevicetreeException(f"phandle '{phandle}' not found in devicetree")
+
+def property_to_string(property: DeviceProperty, devices: list[Device]) -> str:
+    type = property.type
+    if type == "value" or type == "int":
+        return property.value
+    elif type == "boolean" or type == "bool":
+        if property.value is None or not property.value:
+            return "false"
+        else:
+            return "true"
+    elif type == "text":
+        return f"\"{property.value}\""
+    elif type == "values":
+        value_list = list()
+        for item in property.value:
+            if isinstance(item, PropertyValue):
+                value_list.append(property_to_string(DeviceProperty(name="", type=item.type, value=item.value), devices))
+            else:
+                value_list.append(str(item))
+        return "{ " + ",".join(value_list) + " }"
+    elif type == "phandle":
+        # Mirrors the string-passthrough convention "phandles" already uses for sentinel defaults
+        # like GPIO_PIN_SPEC_NONE: a binding default of "NULL" represents "no device referenced",
+        # not an actual node name to resolve.
+        if isinstance(property.value, str) and property.value == "NULL":
+            return "NULL"
+        return find_phandle(devices, property.value)
+    elif type == "phandles":
+        value_list = list()
+        if isinstance(property.value, list):
+            for item in property.value:
+                if isinstance(item, PropertyValue):
+                    value_list.append(property_to_string(DeviceProperty(name="", type=item.type, value=item.value), devices))
+                else:
+                    value_list.append(str(item))
+            return "{ " + ",".join(value_list) + " }"
+        elif isinstance(property.value, str):
+            # If it's a string, assume it's a #define and show it as-is
+            return property.value
+        else:
+            raise Exception(f"Unsupported phandles type for {property.name} with value {property.value} ")
+    else:
+        raise DevicetreeException(f"property_to_string() has an unsupported type: {type}")
+
+def resolve_phandle_array_entries(device_property, devices):
+    """Convert a phandle-array DTS property into a list of C initializer strings."""
+    entries = []
+    if device_property.type == "phandle-array":
+        items = device_property.value
+    elif device_property.type == "values":
+        items = [PropertyValue(type="values", value=device_property.value)]
+    else:
+        return []
+    for item in items:
+        if isinstance(item, PropertyValue):
+            entries.append(property_to_string(DeviceProperty(name="", type=item.type, value=item.value), devices))
+        else:
+            entries.append(str(item))
+    return entries
+
+def validate_property_range(device: Device, binding_property, value) -> None:
+    """Enforces a binding's optional min/max on int-typed properties. Silently skips
+    values that aren't parseable as a plain integer literal (e.g. a passed-through
+    symbolic #define) - those can't be range-checked at compile time."""
+    if binding_property.min is None and binding_property.max is None:
+        return
+    try:
+        numeric_value = int(value, 0) if isinstance(value, str) else int(value)
+    except (TypeError, ValueError):
+        return
+    if binding_property.min is not None and numeric_value < binding_property.min:
+        raise DevicetreeException(
+            f"Device '{device.node_name}' property '{binding_property.name}' value {numeric_value} is below minimum {binding_property.min}"
+        )
+    if binding_property.max is not None and numeric_value > binding_property.max:
+        raise DevicetreeException(
+            f"Device '{device.node_name}' property '{binding_property.name}' value {numeric_value} is above maximum {binding_property.max}"
+        )
+
+def resolve_parameters_from_bindings(device: Device, bindings: list[Binding], devices: list[Device]) -> list:
+    compatible_property = find_device_property(device, "compatible")
+    if compatible_property is None:
+        raise DevicetreeException(f"Cannot find 'compatible' property for {device.node_name}")
+    device_binding = find_binding(compatible_property.value, bindings)
+    if device_binding is None:
+        raise DevicetreeException(f"Binding not found for {device.node_name} and compatible '{compatible_property.value}'")
+    # Filter out system properties
+    binding_properties = []
+    binding_property_names = set()
+    for property in device_binding.properties:
+        if property.name != "compatible":
+            binding_properties.append(property)
+            binding_property_names.add(property.name)
+
+    # Check for invalid properties in device
+    for device_property in device.properties:
+        if device_property.name in ["compatible"]:
+            continue
+        if device_property.name not in binding_property_names:
+            raise DevicetreeException(f"Device '{device.node_name}' has invalid property '{device_property.name}'")
+
+    node_name = get_device_node_name_safe(device)
+    result = []
+    array_decls = []
+    for binding_property in binding_properties:
+        device_property = find_device_property(device, binding_property.name)
+
+        if binding_property.type == "phandle-array":
+            if binding_property.element_type is None:
+                raise DevicetreeException(f"phandle-array property '{binding_property.name}' requires 'element-type' in binding")
+            prop_safe = binding_property.name.replace("-", "_")
+            array_var = f"{node_name}_{prop_safe}"
+            if device_property is not None:
+                entries = resolve_phandle_array_entries(device_property, devices)
+                array_decls.append((array_var, binding_property.element_type, entries))
+                result.append(f"({binding_property.element_type}*){array_var}")
+                result.append(str(len(entries)))
+            elif binding_property.default is not None:
+                result.append("NULL")
+                result.append("0")
+            elif binding_property.required:
+                raise DevicetreeException(f"device {device.node_name} doesn't have property '{binding_property.name}'")
+            else:
+                result.append("NULL")
+                result.append("0")
+            continue
+
+        if binding_property.type == "array":
+            # A flat literal array (DTS `[ ... ]` syntax, e.g. a byte blob), as opposed to
+            # phandle-array's list of resolved device references. Emits the same
+            # (pointer, length) parameter pair, backed by a plain data array instead of one
+            # holding phandle-derived initializers.
+            if binding_property.element_type is None:
+                raise DevicetreeException(f"array property '{binding_property.name}' requires 'element-type' in binding")
+            prop_safe = binding_property.name.replace("-", "_")
+            array_var = f"{node_name}_{prop_safe}"
+            if device_property is not None:
+                if device_property.type != "array":
+                    raise DevicetreeException(
+                        f"Device '{device.node_name}' property '{binding_property.name}' must use '[ ... ]' array syntax"
+                    )
+                entries = [str(value) for value in device_property.value]
+                array_decls.append((array_var, binding_property.element_type, entries))
+                result.append(f"({binding_property.element_type}*){array_var}")
+                result.append(str(len(entries)))
+            elif binding_property.default is not None:
+                result.append("NULL")
+                result.append("0")
+            elif binding_property.required:
+                raise DevicetreeException(f"device {device.node_name} doesn't have property '{binding_property.name}'")
+            else:
+                result.append("NULL")
+                result.append("0")
+            continue
+
+        if device_property is None:
+            if binding_property.default is not None:
+                validate_property_range(device, binding_property, binding_property.default)
+                temp_prop = DeviceProperty(
+                    name=binding_property.name,
+                    type=binding_property.type,
+                    value=binding_property.default
+                )
+                result.append(property_to_string(temp_prop, devices))
+            elif binding_property.required:
+                raise DevicetreeException(f"device {device.node_name} doesn't have property '{binding_property.name}'")
+            elif binding_property.type == "bool" or binding_property.type == "boolean":
+                if binding_property.default == "true" or binding_property.default == None:
+                    result.append("true")
+                else:
+                    result.append("false")
+            else:
+                raise DevicetreeException(f"Device {device.node_name} doesn't have property '{binding_property.name}' and no default value is set")
+        else:
+            validate_property_range(device, binding_property, device_property.value)
+            result.append(property_to_string(device_property, devices))
+
+    return result, array_decls
+
+def write_config(file, device: Device, bindings: list[Binding], devices: list[Device], type_name: str):
+    node_name = get_device_node_name_safe(device)
+    config_type = f"{type_name}_config_dt"
+    config_variable_name = f"{node_name}_config"
+
+    config_params, array_decls = resolve_parameters_from_bindings(device, bindings, devices)
+
+    # Write phandle-array/array variables before the config struct
+    for array_var, element_type, entries in array_decls:
+        entries_str = ", ".join(entries)
+        file.write(f"static {element_type} {array_var}[] = {{ {entries_str} }};\n")
+
+    file.write(f"static const {config_type} {config_variable_name}" " = {\n")
+    # Indent all params
+    for index, config_param in enumerate(config_params):
+        config_params[index] = f"\t{config_param}"
+    # Join with comma and newline
+    if len(config_params) > 0:
+        config_params_joined = ",\n".join(config_params)
+        file.write(f"{config_params_joined}\n")
+    file.write("};\n\n")
+
+def write_device_structs(file, device: Device, parent_device: Device, bindings: list[Binding], devices: list[Device], verbose: bool):
+    if verbose:
+        print(f"Writing device struct for '{device.node_name}'")
+    # Assemble some pre-requisites
+    type_name = get_device_type_name(device, bindings)
+    compatible_property = find_device_property(device, "compatible")
+    if compatible_property is None:
+        raise DevicetreeException(f"Cannot find 'compatible' property for {device.node_name}")
+    node_name = get_device_node_name_safe(device)
+    config_variable_name = f"{node_name}_config"
+    if parent_device is not None:
+        parent_node_name = get_device_node_name_safe(parent_device)
+        parent_value = f"&{parent_node_name}"
+    else:
+        parent_value = "NULL"
+    # Write config struct
+    write_config(file, device, bindings, devices, type_name)
+    # Write device struct
+    address_value = device.node_address if device.node_address is not None else "0"
+    file.write(f"static struct Device {node_name}" " = {\n")
+    file.write(f"\t.address = {address_value},\n")
+    file.write(f"\t.name = \"{device.node_name}\",\n") # Use original name
+    file.write(f"\t.config = &{config_variable_name},\n")
+    file.write("\t.flags = DEVICE_FLAG_DTS,\n")
+    file.write(f"\t.parent = {parent_value},\n")
+    file.write("\t.internal = NULL\n")
+    file.write("};\n\n")
+    # Child devices
+    for child_device in device.devices:
+        write_device_structs(file, child_device, device, bindings, devices, verbose)
+
+def get_device_status_variable(device: Device):
+    if device.status == "okay" or device.status is None:
+        return "DTS_DEVICE_STATUS_OKAY"
+    elif device.status == "disabled":
+        return "DTS_DEVICE_STATUS_DISABLED"
+    else:
+        raise DevicetreeException(f"Unsupported device status '{device.status}'")
+
+def write_device_list_entry(file, device: Device, bindings: list[Binding], verbose: bool):
+    if verbose:
+        print(f"Processing device init code for '{device.node_name}'")
+    # Assemble some pre-requisites
+    compatible_property = find_device_property(device, "compatible")
+    if compatible_property is None:
+        raise DevicetreeException(f"Cannot find 'compatible' property for {device.node_name}")
+    # Type & instance names
+    node_name = get_device_node_name_safe(device)
+    device_variable = node_name
+    status = get_device_status_variable(device)
+    # Write device struct
+    file.write("\t{ " f"&{device_variable}, \"{compatible_property.value}\", {status}" " },\n")
+    # Write children
+    for child_device in device.devices:
+        write_device_list_entry(file, child_device, bindings, verbose)
+
+# Walk the tree and gather all devices
+def gather_devices(device: Device, output: list[Device]):
+    output.append(device)
+    for child_device in device.devices:
+        gather_devices(child_device, output)
+
+def generate_devicetree_c(filename: str, items: list[object], bindings: list[Binding], config, verbose: bool):
+    # Create a cache for looking up device names and aliases easily
+    # We still want to traverse it as a tree during code generation because of parent-setting
+    devices = list()
+    for item in items:
+        if type(item) is Device:
+            gather_devices(item, devices)
+
+    with open(filename, "w") as file:
+        file.write(dedent('''\
+        // Default headers
+        #include <tactility/device.h>
+        #include <tactility/dts.h>
+        #include <tactility/module.h>
+        // DTS headers
+        '''))
+
+        # Write all headers first
+        for item in items:
+            if type(item) is IncludeC:
+                write_include(file, item, verbose)
+            elif type(item) is DefineC:
+                write_define(file, item, verbose)
+        file.write("\n")
+
+        # Then write all devices
+        for item in items:
+            if type(item) is Device:
+                write_device_structs(file, item, None, bindings, devices, verbose)
+        file.write("const struct DtsDevice dts_devices[] = {\n")
+        for item in items:
+            if type(item) is Device:
+                write_device_list_entry(file, item, bindings, verbose)
+        file.write("\tDTS_DEVICE_TERMINATOR\n")
+        file.write("};\n")
+        # Gather module symbols
+        module_symbol_names = []
+        # Device's own module goes first (started before its dependency modules)
+        if config.dts:
+            device_dir = os.path.dirname(os.path.normpath(config.dts))
+            device_name = os.path.basename(device_dir)
+            if device_name:
+                device_module_name = device_name.replace('-', '_')
+                if not device_module_name.endswith("_module"):
+                    device_module_name += "_module"
+                module_symbol_names.append(device_module_name)
+        for dependency in config.dependencies:
+            dependency_name = os.path.basename(os.path.normpath(dependency))
+            module_symbol_name = f"{dependency_name.replace('-', '_')}"
+            if not module_symbol_name.endswith("_module"):
+                module_symbol_name += "_module"
+            module_symbol_names.append(module_symbol_name)
+        file.write("\n")
+        # Forward declaration of symbol variables
+        for symbol in module_symbol_names:
+            file.write(f"extern struct Module {symbol};\n")
+        file.write("\n")
+        # Create array of symbol variables
+        file.write("struct Module* const dts_modules[] = {\n")
+        for symbol in module_symbol_names:
+            file.write(f"\t&{symbol},\n")
+        file.write("\tNULL\n")
+        file.write("};\n")
+
+def generate_devicetree_h(filename: str):
+    with open(filename, "w") as file:
+        file.write(dedent('''\
+        #pragma once
+        #include <tactility/error.h>
+        #include <tactility/dts.h>
+        
+        #ifdef __cplusplus
+        extern "C" {
+        #endif
+        
+        // Array of device tree modules terminated with DTS_MODULE_TERMINATOR
+        extern const struct DtsDevice dts_devices[];
+        
+        // Array of module symbols terminated with NULL
+        extern struct Module* const dts_modules[];
+        
+        #ifdef __cplusplus
+        }
+        #endif
+        '''))
+
+def generate(output_path: str, items: list[object], bindings: list[Binding], config, verbose: bool):
+    if not os.path.exists(output_path):
+        os.makedirs(output_path)
+    devicetree_c_filename = os.path.join(output_path, "devicetree.c")
+    generate_devicetree_c(devicetree_c_filename, items, bindings, config, verbose)
+    devicetree_h_filename = os.path.join(output_path, "devicetree.h")
+    generate_devicetree_h(devicetree_h_filename)
