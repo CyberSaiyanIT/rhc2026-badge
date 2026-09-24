@@ -219,6 +219,7 @@ namespace app {
 #endif
     namespace agenda { extern const ::AppManifest manifest; }
     namespace announcements { extern const ::AppManifest manifest; }
+    namespace tagquest { extern const ::AppManifest manifest; }
     namespace lighting { extern const ::AppManifest manifest; }
     namespace rfid { extern const ::AppManifest manifest; }
     namespace map { extern const ::AppManifest manifest; }
@@ -316,6 +317,7 @@ static void registerInternalApps() {
     app_manager_add(&app::announcements::manifest);
     app_manager_add(&app::lighting::manifest);
     app_manager_add(&app::rfid::manifest);
+    app_manager_add(&app::tagquest::manifest);
     app_manager_add(&app::map::manifest);
     app_manager_add(&app::musicplayer::manifest);
     app_manager_add(&app::retrogo::manifest);

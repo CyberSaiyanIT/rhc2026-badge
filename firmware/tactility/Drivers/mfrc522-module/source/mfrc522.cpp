@@ -1,6 +1,7 @@
 
 // SPDX-License-Identifier: Apache-2.0
 #include <drivers/mfrc522.h>
+#include <drivers/ndef.h>
 #include <mfrc522_module.h>
 
 #include <bindings/nxp_mfrc522.h>
@@ -22,6 +23,10 @@
 #include <string.h>
 
 #define TAG "MFRC522"
+
+// One tag's data area, staged on the stack. Deliberately smaller than an NTAG216's 888-byte area: the
+// quiz payload is a 36-character UUID and this runs on a timer task's stack.
+#define NDEF_READ_MAX_BYTES 256
 
 #define GET_CONFIG(device) (static_cast<const NxpMfrc522Config*>((device)->config))
 
@@ -100,6 +105,7 @@ enum PICC_Command {
     PICC_CMD_SEL_CL2      = 0x95,
     PICC_CMD_SEL_CL3      = 0x97,
     PICC_CMD_HLTA         = 0x50,
+    PICC_CMD_READ         = 0x30,
 };
 
 static void pcd_write_register(Mfrc522Internal* internal, uint8_t reg, uint8_t value) {
@@ -176,7 +182,7 @@ static void pcd_init(Mfrc522Internal* internal) {
     pcd_antenna_on(internal);
 }
 
-static error_t pcd_communicate(Mfrc522Internal* internal, uint8_t command, uint8_t* sendData, uint8_t sendLen, uint8_t* backData, uint8_t* backLen, uint8_t* validBits) {
+static error_t pcd_communicate(Mfrc522Internal* internal, uint8_t command, uint8_t* sendData, uint8_t sendLen, uint8_t* backData, uint8_t backDataSize, uint8_t* backLen, uint8_t* validBits) {
     uint8_t irqEn = 0x00;
     uint8_t waitIRq = 0x00;
     
@@ -232,7 +238,7 @@ static error_t pcd_communicate(Mfrc522Internal* internal, uint8_t command, uint8
         }
         
         if (_n == 0) _n = 1;
-        if (_n > 16) _n = 16;
+        if (_n > backDataSize) _n = backDataSize;
         
         for (uint8_t j = 0; j < _n; j++) {
             if (backData) backData[j] = pcd_read_register(internal, FIFODataReg);
@@ -248,43 +254,163 @@ static error_t pcd_communicate(Mfrc522Internal* internal, uint8_t command, uint8
     pcd_write_register(internal, BitFramingReg, 0x07);
     
     uint8_t len = 0;
-    error_t status = pcd_communicate(internal, PCD_Transceive, &reqMode, 1, bufferATQA, &len, nullptr);
+    error_t status = pcd_communicate(internal, PCD_Transceive, &reqMode, 1, bufferATQA, 2, &len, nullptr);
     if (status != ERROR_NONE || len != 16) {
         return ERROR_RESOURCE;
     }
     return ERROR_NONE;
 }
 
-[[maybe_unused]] static error_t picc_anticoll(Mfrc522Internal* internal, uint8_t* uid) {
-    pcd_clear_register_bitmask(internal, Status2Reg, 0x08);
-    pcd_write_register(internal, BitFramingReg, 0x00);
-    pcd_clear_register_bitmask(internal, CollReg, 0x80);
-    
-    uint8_t buffer[9];
-    buffer[0] = PICC_CMD_SEL_CL1;
-    buffer[1] = 0x20;
-    
-    uint8_t len = 0;
-    error_t status = pcd_communicate(internal, PCD_Transceive, buffer, 2, buffer, &len, nullptr);
-    if (status == ERROR_NONE) {
-        uint8_t uidCheck = 0;
-        for (uint8_t i = 0; i < 4; i++) {
-            uid[i] = buffer[i];
-            uidCheck ^= buffer[i];
-        }
-        if (uidCheck != buffer[4]) {
-            return ERROR_RESOURCE;
+/**
+ * Computes CRC_A over @a data using the reader's own CRC coprocessor.
+ * SELECT, READ and HLTA are all CRC-protected frames, so nothing past anticollision works
+ * without this.
+ */
+static error_t pcd_calculate_crc(Mfrc522Internal* internal, const uint8_t* data, uint8_t length, uint8_t* result) {
+    pcd_write_register(internal, CommandReg, PCD_Idle);
+    pcd_write_register(internal, DivIrqReg, 0x04);
+    pcd_set_register_bitmask(internal, FIFOLevelReg, 0x80);
+
+    for (uint8_t i = 0; i < length; i++) {
+        pcd_write_register(internal, FIFODataReg, data[i]);
+    }
+    pcd_write_register(internal, CommandReg, PCD_CalcCRC);
+
+    for (uint16_t i = 5000; i > 0; i--) {
+        if (pcd_read_register(internal, DivIrqReg) & 0x04) {
+            pcd_write_register(internal, CommandReg, PCD_Idle);
+            result[0] = pcd_read_register(internal, CRCResultRegL);
+            result[1] = pcd_read_register(internal, CRCResultRegH);
+            return ERROR_NONE;
         }
     }
-    return status;
+    return ERROR_TIMEOUT;
+}
+
+/**
+ * Runs anticollision and SELECT for every cascade level, leaving the PICC in ACTIVE.
+ *
+ * Anticollision alone leaves it in READY, where \read is not a legal command, so the NDEF
+ * path needs the SELECT frames this adds. NTAG and Ultralight carry a 7-byte UID, which is
+ * delivered across two cascade levels rather than one.
+ *
+ * \read PICC_CMD_READ, and equally HLTA. See ISO/IEC 14443-3 section 6.4.3.
+ *
+ * @param[out] uid_out receives 4, 7 or 10 bytes
+ * @param[out] sak the last cascade level's Select Acknowledge
+ */
+static error_t picc_select(Mfrc522Internal* internal, uint8_t* uid_out, size_t* uid_len, uint8_t* sak) {
+    static const uint8_t cascade_commands[3] = { PICC_CMD_SEL_CL1, PICC_CMD_SEL_CL2, PICC_CMD_SEL_CL3 };
+    size_t uid_index = 0;
+
+    pcd_clear_register_bitmask(internal, Status2Reg, 0x08);
+
+    for (uint8_t level = 0; level < 3; level++) {
+        uint8_t buffer[9];
+        buffer[0] = cascade_commands[level];
+        buffer[1] = 0x20; // NVB: nothing of the UID is known yet at this level.
+
+        // Anticollision: the tag answers with 4 UID bytes (or a cascade tag plus 3) and a BCC.
+        pcd_write_register(internal, BitFramingReg, 0x00);
+        pcd_clear_register_bitmask(internal, CollReg, 0x80);
+
+        uint8_t received[5];
+        uint8_t back_len = 0;
+        error_t status = pcd_communicate(internal, PCD_Transceive, buffer, 2, received, sizeof(received), &back_len, nullptr);
+        if (status != ERROR_NONE || back_len != 40) {
+            return ERROR_RESOURCE;
+        }
+
+        uint8_t bcc = 0;
+        for (uint8_t i = 0; i < 4; i++) {
+            bcc ^= received[i];
+        }
+        if (bcc != received[4]) {
+            return ERROR_RESOURCE;
+        }
+
+        // SELECT: the same command with the full UID, NVB=0x70 and a CRC_A.
+        buffer[1] = 0x70;
+        memcpy(&buffer[2], received, 5);
+        if (pcd_calculate_crc(internal, buffer, 7, &buffer[7]) != ERROR_NONE) {
+            return ERROR_TIMEOUT;
+        }
+
+        uint8_t sak_response[3];
+        back_len = 0;
+        status = pcd_communicate(internal, PCD_Transceive, buffer, 9, sak_response, sizeof(sak_response), &back_len, nullptr);
+        if (status != ERROR_NONE || back_len != 24) {
+            return ERROR_RESOURCE;
+        }
+
+        // A set cascade bit means byte 0 of the anticollision answer was the cascade tag rather
+        // than UID data, and another level follows.
+        const bool more_levels = (sak_response[0] & 0x04) != 0;
+        if (more_levels) {
+            if (received[0] != PICC_CMD_CT) {
+                return ERROR_RESOURCE;
+            }
+            memcpy(uid_out + uid_index, &received[1], 3);
+            uid_index += 3;
+        } else {
+            memcpy(uid_out + uid_index, received, 4);
+            uid_index += 4;
+            if (sak) *sak = sak_response[0];
+            if (uid_len) *uid_len = uid_index;
+            return ERROR_NONE;
+        }
+    }
+
+    return ERROR_RESOURCE;
+}
+
+/** Reads the 4 pages starting at @a page. Type 2 tags always answer 16 bytes. */
+static error_t picc_read_page(Mfrc522Internal* internal, uint8_t page, uint8_t* out) {
+    uint8_t buffer[4];
+    buffer[0] = PICC_CMD_READ;
+    buffer[1] = page;
+    if (pcd_calculate_crc(internal, buffer, 2, &buffer[2]) != ERROR_NONE) {
+        return ERROR_TIMEOUT;
+    }
+
+    uint8_t received[18]; // 16 data bytes plus CRC_A
+    uint8_t back_len = 0;
+    error_t status = pcd_communicate(internal, PCD_Transceive, buffer, 4, received, sizeof(received), &back_len, nullptr);
+    if (status != ERROR_NONE || back_len != 144) {
+        return ERROR_RESOURCE;
+    }
+
+    memcpy(out, received, 16);
+    return ERROR_NONE;
+}
+
+/**
+ * Puts the tag into HALT.
+ * Without it a tag left on the antenna keeps answering REQA, so the next scan re-reads the tag
+ * the caller has already handled.
+ */
+static error_t picc_halt(Mfrc522Internal* internal) {
+    uint8_t buffer[4];
+    buffer[0] = PICC_CMD_HLTA;
+    buffer[1] = 0x00;
+    if (pcd_calculate_crc(internal, buffer, 2, &buffer[2]) != ERROR_NONE) {
+        return ERROR_TIMEOUT;
+    }
+
+    // A correctly halted tag stays silent, so the timeout this returns is the success case.
+    uint8_t back_len = 0;
+    error_t status = pcd_communicate(internal, PCD_Transceive, buffer, 4, nullptr, 0, &back_len, nullptr);
+    return (status == ERROR_TIMEOUT) ? ERROR_NONE : ERROR_RESOURCE;
 }
 
 extern "C" bool mfrc522_read_uid(struct Device* dev, uint8_t* uid_out, size_t* len) {
     if (!dev || !device_get_driver_data(dev)) return false;
     auto* internal = static_cast<Mfrc522Internal*>(device_get_driver_data(dev));
 
-    // The reader shares its controller with the display. Taken once around the whole exchange:
-    // the reader's FIFO does not survive another device's transfer landing mid-conversation.
+    // The reader shares its controller with the display, which flushes from the LVGL task while a
+    // scan runs from the app's timer. Taken once around the whole exchange rather than per
+    // transfer: a REQA and the anticollision that answers it are one conversation, and the
+    // reader's FIFO does not survive another device's transfer landing in the middle of it.
     if (spi_controller_lock_bus_of(dev) != ERROR_NONE) {
         return false;
     }
@@ -292,10 +418,71 @@ extern "C" bool mfrc522_read_uid(struct Device* dev, uint8_t* uid_out, size_t* l
     bool found = false;
     uint8_t bufferATQA[2];
     if (picc_request(internal, PICC_CMD_REQA, bufferATQA) == ERROR_NONE) {
-        if (picc_anticoll(internal, uid_out) == ERROR_NONE) {
-            if (len) *len = 4;
+        // The full cascade, not just anticollision: a 7-byte-UID tag answers cascade level 1 with
+        // the cascade tag 0x88 followed by only three UID bytes, so the anticollision response on
+        // its own is not the UID.
+        if (picc_select(internal, uid_out, len, nullptr) == ERROR_NONE) {
             found = true;
         }
+        picc_halt(internal);
+    }
+
+    spi_controller_unlock_bus_of(dev);
+    return found;
+}
+
+extern "C" bool mfrc522_read_ndef_text(struct Device* dev, char* out, size_t out_size, bool* out_tag_present) {
+    if (out_tag_present) *out_tag_present = false;
+    if (!dev || !device_get_driver_data(dev) || !out || out_size == 0) return false;
+    auto* internal = static_cast<Mfrc522Internal*>(device_get_driver_data(dev));
+
+    if (spi_controller_lock_bus_of(dev) != ERROR_NONE) {
+        return false;
+    }
+
+    bool found = false;
+    uint8_t bufferATQA[2];
+    if (picc_request(internal, PICC_CMD_REQA, bufferATQA) == ERROR_NONE) {
+        uint8_t uid[10];
+        size_t uid_len = 0;
+        uint8_t sak = 0;
+        if (picc_select(internal, uid, &uid_len, &sak) == ERROR_NONE) {
+            // Reported even when the NDEF walk below fails, so the caller can tell a tag it could
+            // not read from no tag at all.
+            if (out_tag_present) *out_tag_present = true;
+
+            // The capability container sits in page 3. Its first byte is the NDEF magic number;
+            // anything else means the tag was never formatted for NDEF and the data area holds
+            // no TLVs to walk.
+            uint8_t page_data[16];
+            if (picc_read_page(internal, 3, page_data) == ERROR_NONE && page_data[0] == 0xE1) {
+                // The usable data area is bounded by the CC's size byte, which counts 8-byte
+                // blocks. Capped so a corrupt CC cannot drive an unbounded read.
+                size_t available = static_cast<size_t>(page_data[2]) * 8;
+                if (available > NDEF_READ_MAX_BYTES) {
+                    available = NDEF_READ_MAX_BYTES;
+                }
+
+                uint8_t data[NDEF_READ_MAX_BYTES];
+                size_t read_bytes = 0;
+                // Each READ answers with 4 pages, so the data area is walked 16 bytes at a time
+                // from page 4.
+                for (uint8_t page = 4; read_bytes < available; page += 4) {
+                    if (picc_read_page(internal, page, page_data) != ERROR_NONE) {
+                        break;
+                    }
+                    size_t chunk = available - read_bytes;
+                    if (chunk > sizeof(page_data)) {
+                        chunk = sizeof(page_data);
+                    }
+                    memcpy(data + read_bytes, page_data, chunk);
+                    read_bytes += chunk;
+                }
+
+                found = ndef_parse_text_record(data, read_bytes, out, out_size);
+            }
+        }
+        picc_halt(internal);
     }
 
     spi_controller_unlock_bus_of(dev);

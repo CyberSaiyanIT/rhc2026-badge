@@ -62,7 +62,8 @@ bool isScreensaverInhibited() {
     if (app_manager_get_topmost_app_id(app_id, sizeof(app_id)) != ERROR_NONE) {
         return false;
     }
-    return std::strcmp(app_id, "tactility.pingpong") == 0;
+    return std::strcmp(app_id, "tactility.pingpong") == 0 ||
+        std::strcmp(app_id, "TagQuest") == 0;
 }
 
 /** Paused counts: the user is still on a track, just not hearing it right now. */

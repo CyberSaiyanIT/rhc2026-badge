@@ -49,6 +49,7 @@ void createAppWidget(const ::AppManifest* manifest, lv_obj_t* list) {
 constexpr const char* PINNED_APP_IDS[] = {
     "Announcements",
     "Agenda",
+    "TagQuest",
     "VenueMap",
     "Lighting",
     "tactility.pingpong",
