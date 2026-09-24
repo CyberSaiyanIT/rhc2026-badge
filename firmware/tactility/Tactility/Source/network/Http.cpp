@@ -49,16 +49,31 @@ bool isDownloading() {
 constexpr int READ_SIZE = 512;
 
 /**
- * How much is staged before it reaches the filesystem. Writing each 512-byte read straight through
- * turns a 237 kB download into ~3.7 MB of flash traffic. A multiple of the flash sector; read size
- * is not raised with it, being what paces the loop against the NeoPixel render task.
+ * How much is staged before it reaches the filesystem.
+ *
+ * The internal data partition runs wear levelling with 512-byte FAT sectors in safe mode, where
+ * erasing one FAT sector costs four flash sector erases plus a dump-and-restore of the surrounding
+ * 4 kB (WL_Ext_Safe::erase_sector_fit), and every write erases first (diskio_wl.c's ff_wl_write).
+ * Writing each 512-byte read straight through therefore turned a 237 kB download into roughly
+ * 3.7 MB of flash traffic and two minutes of wall-clock time.
+ *
+ * A multiple of the 4 kB flash sector, and only whole sectors are ever committed, so a commit never
+ * straddles a sector it does not fill and trigger the dump-and-restore path anyway. The \reads
+ * stay small regardless.
+ *
+ * \reads Read size is what paces this loop against the NeoPixel render task, so it is deliberately
+ *     not raised along with this: see commitStaged() for the other half of that.
  */
 constexpr size_t STAGING_BUFFER_SIZE = 32768;
 constexpr size_t FLASH_SECTOR_SIZE = 4096;
+// Largest body held whole in external RAM to keep flash writes out of the transfer. Above this a
+// download is streamed, so a big file cannot claim most of the external heap for its own duration.
+constexpr size_t DEFERRED_WRITE_MAX_BYTES = 2 * 1024 * 1024;
 
 /**
- * Strips the gzip framing tinfl does not handle, speaking raw deflate and zlib rather than RFC
- * 1952. Fed byte by byte: the header can span reads and its optional fields are NUL-terminated.
+ * Strips the gzip framing tinfl does not handle: it speaks raw deflate and zlib, not RFC 1952.
+ * Fed byte by byte because the header can span reads, and its optional name and comment fields are
+ * NUL-terminated rather than length-prefixed.
  */
 class GzipHeaderParser {
     enum class Field : uint8_t { Fixed, Extra, ExtraData, Name, Comment, Crc, Done, Failed };
@@ -321,6 +336,30 @@ std::unique_ptr<esp_http_client_config_t> makeConfig(const std::string& url, con
     return config;
 }
 
+/**
+ * Writes a body that is already in memory, in flash-sector-sized commits.
+ *
+ * The delay between commits is not pacing for its own sake: a flash erase suspends the cache on
+ * both cores, so without a gap the NeoPixel render task cannot meet its 25 ms frame deadline and
+ * the strip visibly flickers.
+ */
+bool writePaced(FILE* file, const uint8_t* data, size_t size, int64_t& write_us, int& commits) {
+    while (size > 0) {
+        const size_t commit_size = std::min(STAGING_BUFFER_SIZE, size);
+        const int64_t write_started_us = esp_timer_get_time();
+        const size_t written = fwrite(data, 1, commit_size, file);
+        write_us += esp_timer_get_time() - write_started_us;
+        commits++;
+        if (written != commit_size) {
+            return false;
+        }
+        data += commit_size;
+        size -= commit_size;
+        vTaskDelay(1);
+    }
+    return true;
+}
+
 /** Outcome of one file download, so both public entry points can share the transfer. */
 struct FileDownloadResult {
     const char* error = nullptr;
@@ -390,17 +429,34 @@ FileDownloadResult downloadToFile(
     const auto bytes_left = client->getContentLength();
     const bool is_chunked = (bytes_left <= 0);
 
+    /**
+     * A flash erase suspends the cache on both cores, which stalls the Wi-Fi task and backpressures
+     * TCP, so writing while the socket is open costs the transfer about as much as it costs the
+     * write. A body whose final size is known up front and fits is held whole instead and written
+     * once the transfer is over. Asked of external RAM alone: a device without it keeps streaming
+     * rather than spending its internal heap on a whole file, and so does a body that gzip makes
+     * larger than the Content-Length that sized this.
+     */
+    const bool defer_write = !is_chunked && !response_info.gzipped &&
+        bytes_left > 0 && (size_t) bytes_left <= DEFERRED_WRITE_MAX_BYTES;
+    std::unique_ptr<uint8_t, decltype(&heap_caps_free)> deferred(
+        defer_write
+            ? static_cast<uint8_t*>(heap_caps_malloc((size_t) bytes_left, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT))
+            : nullptr,
+        &heap_caps_free
+    );
+
     // Prefers PSRAM: a staging buffer is a memcpy target, never DMA, and internal RAM is the
     // scarce pool on these boards. Falls back to internal for devices without PSRAM.
     std::unique_ptr<char, decltype(&heap_caps_free)> buffer(
-        static_cast<char*>(heap_caps_malloc_prefer(
+        deferred != nullptr ? nullptr : static_cast<char*>(heap_caps_malloc_prefer(
             STAGING_BUFFER_SIZE, 2,
             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT
         )),
         &heap_caps_free
     );
-    if (buffer == nullptr) {
+    if (deferred == nullptr && buffer == nullptr) {
         result.error = "Failed to allocate download buffer";
         return result;
     }
@@ -422,9 +478,12 @@ FileDownloadResult downloadToFile(
     const int64_t started_us = esp_timer_get_time();
 
     /**
-     * Commits whole flash sectors and keeps the tail, so every write but the last lands on a 4 kB
-     * boundary; @a flush writes the tail too. The delay exists because a flash erase suspends the
-     * cache on both cores, which otherwise costs the NeoPixel task its 25 ms frame deadline.
+     * Commits whole flash sectors and keeps the tail, so every write but the last starts and
+     * ends on a 4 kB boundary. @a flush writes that tail too.
+     *
+     * The delay is not pacing for its own sake: a flash erase suspends the cache on both cores,
+     * so without a gap between commits the NeoPixel render task cannot meet its 25 ms frame
+     * deadline and the strip visibly flickers.
      */
     auto commitStaged = [&](bool flush) {
         size_t commit_size = flush ? staged : staged - (staged % FLASH_SECTOR_SIZE);
@@ -449,6 +508,16 @@ FileDownloadResult downloadToFile(
     const char* error = receiveBody(
         *client, response_info.gzipped, bytes_left, is_chunked, read_us, total_bytes,
         [&](const uint8_t* data, size_t size) {
+            if (deferred != nullptr) {
+                // Content-Length sized the buffer, so a body that exceeds it is a broken response
+                // rather than something to grow for.
+                if (written_bytes + size > (size_t) bytes_left) {
+                    return false;
+                }
+                memcpy(deferred.get() + written_bytes, data, size);
+                written_bytes += size;
+                return true;
+            }
             while (size > 0) {
                 const size_t take = std::min(STAGING_BUFFER_SIZE - staged, size);
                 memcpy(buffer.get() + staged, data, take);
@@ -463,8 +532,13 @@ FileDownloadResult downloadToFile(
             return true;
         }
     );
-    if (error == nullptr && !commitStaged(true)) {
-        error = "Failed to store data";
+    if (error == nullptr) {
+        const bool stored = deferred != nullptr
+            ? writePaced(file, deferred.get(), written_bytes, write_us, commits)
+            : commitStaged(true);
+        if (!stored) {
+            error = "Failed to store data";
+        }
     }
     if (error != nullptr) {
         fclose(file);
@@ -638,6 +712,94 @@ void downloadToMemory(
             (int) (read_us / 1000)
         );
         onSuccess(data);
+    });
+#else
+    getMainDispatcher().dispatch([onError] {
+        onError("Not implemented");
+    });
+#endif
+}
+
+
+void request(
+    const std::string& url,
+    Method method,
+    const std::string& certFilePath,
+    const std::string& body,
+    const std::string& contentType,
+    const std::function<void(const Response& response)>& onSuccess,
+    const std::function<void(const char* errorMessage)>& onError
+) {
+    LOG_I(TAG, "Requesting %s", url.c_str());
+#ifdef ESP_PLATFORM
+    getMainDispatcher().dispatch([url, method, certFilePath, body, contentType, onSuccess, onError] {
+        DownloadScope scope;
+
+        std::shared_ptr<uint8_t[]> certificate = nullptr;
+        if (!certFilePath.empty()) {
+            certificate = file::readString(certFilePath);
+            if (certificate == nullptr) {
+                onError("Failed to read certificate");
+                return;
+            }
+        }
+
+        ResponseInfo response_info;
+        auto config = makeConfig(
+            url,
+            certificate ? reinterpret_cast<const char*>(certificate.get()) : nullptr,
+            certificate ? strlen(reinterpret_cast<const char*>(certificate.get())) + 1 : 0,
+            response_info
+        );
+        config->method = (method == Method::Post) ? HTTP_METHOD_POST : HTTP_METHOD_GET;
+
+        auto client = std::make_unique<EspHttpClient>();
+        if (!client->init(std::move(config))) {
+            onError("Failed to initialize client");
+            return;
+        }
+        client->setHeader("Accept-Encoding", "gzip");
+        if (!body.empty() && !contentType.empty()) {
+            client->setHeader("Content-Type", contentType.c_str());
+        }
+
+        if (!client->open(static_cast<int>(body.size()))) {
+            onError("Failed to open connection");
+            return;
+        }
+        if (!body.empty() && !client->write(body.data(), static_cast<int>(body.size()))) {
+            onError("Failed to send request body");
+            return;
+        }
+        if (!client->fetchHeaders()) {
+            onError("Failed to get response headers");
+            return;
+        }
+
+        Response response;
+        response.statusCode = client->getStatusCode();
+
+        const auto bytes_left = client->getContentLength();
+        const bool is_chunked = (bytes_left <= 0);
+
+        int64_t read_us = 0;
+        size_t total_bytes = 0;
+        const char* error = receiveBody(
+            *client, response_info.gzipped, bytes_left, is_chunked, read_us, total_bytes,
+            [&](const uint8_t* chunk, size_t size) {
+                response.body.insert(response.body.end(), chunk, chunk + size);
+                return true;
+            }
+        );
+        if (error != nullptr) {
+            onError(error);
+            return;
+        }
+
+        // Deliberately not gated on the status code: the caller decides which codes are failures,
+        // and the body is what carries the reason.
+        LOG_I(TAG, "Request to %s returned %d with %u bytes", url.c_str(), response.statusCode, (unsigned) response.body.size());
+        onSuccess(response);
     });
 #else
     getMainDispatcher().dispatch([onError] {

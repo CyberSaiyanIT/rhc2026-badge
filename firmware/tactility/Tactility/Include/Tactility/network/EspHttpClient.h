@@ -47,10 +47,11 @@ public:
         return esp_http_client_get_header(client, key, outValue) == ESP_OK && *outValue != nullptr;
     }
 
-    bool open() {
+    /** @a writeLength is the request body's size, and becomes its Content-Length. */
+    bool open(int writeLength = 0) {
         assert(client != nullptr);
-        LOG_I(TAG, "open()");
-        auto result = esp_http_client_open(client, 0);
+        LOG_I(TAG, "open(%d)", writeLength);
+        auto result = esp_http_client_open(client, writeLength);
 
         if (result != ESP_OK) {
             LOG_E(TAG, "open() failed: %s", esp_err_to_name(result));
@@ -58,6 +59,21 @@ public:
         }
 
         isOpen = true;
+        return true;
+    }
+
+    /** Must be called after open() and before fetchHeaders(). */
+    bool write(const char* bytes, int size) const {
+        assert(client != nullptr);
+        LOG_I(TAG, "write(%d)", size);
+        int written = 0;
+        while (written < size) {
+            const int result = esp_http_client_write(client, bytes + written, size - written);
+            if (result <= 0) {
+                return false;
+            }
+            written += result;
+        }
         return true;
     }
 

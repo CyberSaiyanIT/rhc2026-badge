@@ -35,6 +35,13 @@ bool loadPropertiesFile(const std::string& filePath, std::map<std::string, std::
 }
 
 bool savePropertiesFile(const std::string& filePath, const std::map<std::string, std::string>& properties) {
+    // properties_file_open() requires the parent directory to already exist, and the per-app and
+    // per-service data directories are only created on their first save - they aren't shipped in
+    // the flashed filesystem image.
+    if (!findOrCreateParentDirectory(filePath, 0777)) {
+        return false;
+    }
+
     PropertiesFile* file = properties_file_open(filePath.c_str());
     if (file == nullptr) {
         return false;
@@ -44,8 +51,9 @@ bool savePropertiesFile(const std::string& filePath, const std::map<std::string,
         properties_file_set(file, key.c_str(), value.c_str());
     }
 
-    // properties_file_close() is what writes and replaces the file, so its result is the only
-    // evidence the save happened.
+    // properties_file_close() is what actually writes and replaces the file, so its result is the
+    // only evidence the save happened; reporting success regardless left callers storing nothing
+    // and logging that they had.
     return properties_file_close(file) == ERROR_NONE;
 }
 

@@ -33,8 +33,10 @@ constexpr TickType_t TICK_INTERVAL_TICKS = pdMS_TO_TICKS(250);
 constexpr uint32_t TICKS_PER_SECOND = 4;
 // Half a minute of listening is the most a badge pulled off its lanyard can lose.
 constexpr uint32_t STATS_FLUSH_TICKS = 30 * TICKS_PER_SECOND;
-// How long the meter keeps the strip after the music stops: long enough that a track change or a
-// gap between albums does not bounce the lighting out and straight back in.
+// How long the meter keeps the strip after the music stops. Long enough that changing track,
+// pausing to look something up, or a gap between albums does not throw the lighting back to its
+// other animation and immediately into the meter again. Distinct from the lighting service's own
+// inactive timeout, which is counted from user input and measured in tens of minutes.
 constexpr uint32_t VU_LINGER_TICKS = 37 * TICKS_PER_SECOND;
 // Sized for AudioPlayer::play(), which builds the whole ESP-ADF pipeline on this thread.
 constexpr configSTACK_DEPTH_TYPE TICK_STACK_SIZE = 8192;
@@ -53,8 +55,9 @@ constexpr Preset PRESETS[] = {
     { "Rock",    {  6,  4,  2, -1, -2,  0,  3,  5,  6,  6 } },
     { "Podcast", { -6, -4,  0,  4,  6,  5,  3,  0, -2, -4 } },
     { "Loudness", {  8,  6,  3,  0, -1, -1,  0,  3,  6,  8 } },
-    // The speaker cannot move air below ~200 Hz, so those bands only spend headroom on
-    // distortion. Cutting them and lifting the upper mids is what makes it sound louder.
+    // The badge's speaker cannot move air below roughly 200 Hz, so feeding it those bands only
+    // spends headroom on distortion. Cutting them and lifting the upper mids is what makes it
+    // sound louder and clearer at the same amplifier setting.
     { "Badge",   { -9, -7, -2,  3,  5,  6,  4,  2,  0, -2 } },
 };
 constexpr int PRESET_COUNT = (int) (sizeof(PRESETS) / sizeof(PRESETS[0]));
@@ -72,8 +75,10 @@ bool isPlayable(const char* name) {
 }
 
 /**
- * How deep a folder is followed when queued whole, and how many files one press may add. This
- * runs with the service locked, which the UI polls through four times a second.
+ * How deep a folder is followed when it is queued whole, and how many files one press may add.
+ *
+ * Both matter because this runs with the service locked, and the UI polls telemetry through the
+ * same lock four times a second. Whatever is left out is logged rather than dropped quietly.
  */
 constexpr int ENQUEUE_MAX_DEPTH = 4;
 constexpr int ENQUEUE_MAX_FILES = 256;
@@ -148,13 +153,16 @@ std::string mountedSdCardPath() {
 
 } // namespace
 
+// region Private
+
 void MusicService::resolveLibraryRootLocked() const {
     if (!libraryDirectory.empty()) {
         return;
     }
 
-    // A mounted SD card is the library; the internal partition is a fallback, not a second
-    // source, so a card's contents are never mixed with what shipped on the badge.
+    // A mounted SD card is the library. The internal partition is the fallback rather than a
+    // second source, so what someone brings on a card is never mixed with what shipped on the
+    // badge.
     const auto sdcard_path = mountedSdCardPath();
     libraryDirectory = std::format("{}/Music", sdcard_path.empty() ? file::MOUNT_POINT_DATA : sdcard_path.c_str());
     LOG_I(TAG, "Library root: %s", libraryDirectory.c_str());
@@ -300,6 +308,10 @@ void MusicService::startTrackLocked(int index) {
 
     const auto& path = queue[trackIndex];
     player->play(path);
+    // Reported here rather than where the player reports its own tasks: this thread outlives every
+    // pipeline, and a track change is the one point it passes through per track. The value is the
+    // least it ever had free, so it covers every tick before this one.
+    LOG_I(TAG, "Stack headroom of music_tick: %u bytes", (unsigned) tickThread->getStackSpace());
     setMediaKeysEnabled(true);
 
     const auto slash = path.find_last_of('/');
@@ -327,8 +339,9 @@ int MusicService::nextIndexLocked() {
     return next;
 }
 
-// A boosted band adds level the 16-bit output has no room for, so backing off by the largest
-// boost keeps the curve's shape instead of trading it for clipping.
+// A boosted band adds level on top of what the file already had, and 16-bit output has no room
+// above full scale. Backing the output off by the largest boost keeps the shape of the curve
+// instead of trading it for clipping.
 int MusicService::effectiveGainLocked() const {
     int trim = 0;
     if (autoPreamp) {
@@ -421,6 +434,10 @@ void MusicService::onTick() {
     }
 }
 
+// endregion
+
+// region Lifecycle
+
 bool MusicService::onStart(ServiceContext& serviceContext) {
     if (device_get_by_name("speaker_power", &speakerRail) != ERROR_NONE) {
         LOG_W(TAG, "No speaker_power rail");
@@ -457,6 +474,10 @@ void MusicService::onStop(ServiceContext& serviceContext) {
         speakerRail = nullptr;
     }
 }
+
+// endregion
+
+// region Playlist
 
 bool MusicService::isAvailable() const {
     return device_exists_of_type(&AUDIO_STREAM_TYPE);
@@ -563,6 +584,10 @@ bool MusicService::isQueued(const std::string& path) const {
     return std::find(queue.begin(), queue.end(), path) != queue.end();
 }
 
+// endregion
+
+// region Transport
+
 void MusicService::playPause() {
     auto lock = mutex.asScopedLock();
     lock.lock();
@@ -634,6 +659,10 @@ Telemetry MusicService::getTelemetry() const {
     return player != nullptr ? player->getTelemetry() : Telemetry {};
 }
 
+// endregion
+
+// region Modes
+
 bool MusicService::isShuffleEnabled() const {
     auto lock = mutex.asScopedLock();
     lock.lock();
@@ -657,6 +686,10 @@ void MusicService::setRepeat(Repeat value) {
     lock.lock();
     repeat = value;
 }
+
+// endregion
+
+// region DSP
 
 int MusicService::getPresetIndex() const {
     auto lock = mutex.asScopedLock();
@@ -821,6 +854,10 @@ void MusicService::setAutoPreampEnabled(bool enabled) {
     applyGainLocked();
 }
 
+// endregion
+
+// region Speaker
+
 bool MusicService::isVuSeedingEnabled() const {
     return vuSeeding.load();
 }
@@ -868,6 +905,8 @@ bool MusicService::setSpeakerEnabled(bool enabled) {
     lock.lock();
     return setSpeakerLocked(enabled);
 }
+
+// endregion
 
 int getPresetCount() { return PRESET_COUNT; }
 

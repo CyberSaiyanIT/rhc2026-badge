@@ -155,8 +155,12 @@ void onReceive(Context* ctx, const esp_now_recv_info_t* receiveInfo, const uint8
 }
 
 /**
- * Leaves any access point for as long as the app runs. An associated badge follows its AP's
- * channel rather than the one ESP-NOW asks for, so two badges on different networks never meet.
+ * Leaves any access point for as long as the app runs.
+ *
+ * Two badges only meet if their radios are on the same channel, and an associated badge follows
+ * its access point's channel rather than the one ESP-NOW asks for: two badges on different
+ * networks cannot see each other at all, and one sharing the air with a busy network sees its
+ * paddle updates queue behind that traffic. Disconnected, both land on the configured channel.
  *
  * @return the SSID to rejoin afterwards, empty when nothing was connected
  */
@@ -199,12 +203,16 @@ void rejoinAccessPoint(const std::string& ssid) {
 }
 
 /**
- * ESP-NOW rides the WiFi radio, so the radio stays on. Modem sleep does not: it parks the receiver
- * between beacons, which arrives here as a late paddle position.
+ * ESP-NOW is carried by the WiFi radio, so the radio cannot be turned off for a match. What can
+ * go is modem sleep: with power saving on, a badge that is associated with an access point parks
+ * its receiver between beacons and delays whatever arrives in between, which shows up here as a
+ * paddle position that reaches the host late.
  */
 void setRadioLowLatency(bool lowLatency) {
     (void)esp_wifi_set_ps(lowLatency ? WIFI_PS_NONE : WIFI_PS_MIN_MODEM);
 }
+
+// region Encrypted peer
 
 bool addEncryptedPeer(Context* ctx) {
     esp_now_peer_info_t peer {};
@@ -227,6 +235,10 @@ void removeEncryptedPeer(Context* ctx) {
     service::espnow::removePeer(ctx->peerRadioAddress.data());
     ctx->encryptedPeerAdded = false;
 }
+
+// endregion
+
+// region Input
 
 /** Tunes every keypad indev's auto-repeat, so paddle movement follows a held key closely. */
 void setKeypadRepeat(bool fast) {
@@ -288,6 +300,10 @@ void onExitClicked(lv_event_t* event) {
     static_cast<Context*>(lv_event_get_user_data(event))->leaveRequested = true;
 }
 
+// endregion
+
+// region UI
+
 void onContentDeleted(lv_event_t* event) {
     auto* ctx = static_cast<Context*>(lv_event_get_user_data(event));
     ctx->widgets = Widgets {};
@@ -318,7 +334,9 @@ void buildLobby(Context* ctx) {
     lv_label_set_text(title, "PING PONG");
 
     auto* name = createGameLabel(content, FONT_SIZE_SMALL, COLOR_DIM);
-    lv_label_set_text_fmt(name, "%s", ctx->myName.c_str());
+    // Labelled rather than bare: an unexplained word under the title reads as a leftover debug
+    // string, not as who you are playing as.
+    lv_label_set_text_fmt(name, "Player: %s", ctx->myName.c_str());
 
     auto* list = lv_obj_create(content);
     ctx->widgets.peerList = list;
@@ -510,8 +528,9 @@ void refreshPeerList(Context* ctx) {
     auto* list = ctx->widgets.peerList;
     if (list == nullptr) return;
 
-    // Rebuilding destroys the focused button and re-sorting moves rows under the user, so while
-    // the same badges are on screen only the labels are rewritten and the order is left alone.
+    // Rebuilding destroys the focused button, and re-sorting moves rows out from under whoever
+    // is navigating them. Both are avoided while the same badges are on screen: only the labels
+    // are rewritten, in place, and the order is left alone until the set itself changes.
     std::vector<const Peer*> ranked;
     ranked.reserve(ctx->peers.size());
     for (const auto& peer : ctx->peers) {
@@ -645,9 +664,17 @@ void render(Context* ctx) {
     }
 }
 
+// endregion
+
+// region Game
+
 /**
- * Timestamps are compared with lv_tick_elaps(), never against a tick sampled earlier in the same
- * pass: a phase entered mid-tick starts later, and the unsigned subtraction wraps to ~4.3 billion.
+ * Timestamps are always compared with lv_tick_elaps(), never against a tick sampled earlier in
+ * the same pass: a phase entered part-way through a tick starts \later than that sample, and the
+ * unsigned subtraction would wrap to roughly 4.3 billion and fire every timeout at once.
+ *
+ * \later Which is what made a challenge report "did not respond" and the badge it invited report
+ *     "challenge declined", both instantly, without either dialog ever being shown.
  */
 void setPhase(Context* ctx, Phase phase) {
     ctx->phase = phase;
@@ -761,7 +788,8 @@ void simulate(Context* ctx) {
     };
 
     // The ball travels further in one tick than the paddle is thick, so the test is where its
-    // leading edge crossed the paddle's plane, not where it lands.
+    // leading edge crossed the paddle's plane during this step, not where it happens to sit
+    // afterwards. Testing the landing position lets a fast ball step straight over the paddle.
     auto contactHeight = [&](int32_t plane, int32_t leadingBefore, int32_t leadingAfter) {
         const int32_t travelled = leadingBefore - leadingAfter;
         if (travelled == 0) return static_cast<int32_t>(game.ballY);
@@ -1084,8 +1112,9 @@ void tick(Context* ctx, uint32_t& nextHelloMs, uint32_t& networkTick) {
             break;
 
         case Phase::Inviting:
-            // Invite, Accept and Decline are unacknowledged broadcasts, so the challenge repeats
-            // until answered; one lost frame otherwise costs both badges their full timeout.
+            // Invite, Accept and Decline are all unacknowledged broadcasts, so the challenge is
+            // repeated until it is answered: a single lost frame otherwise costs both badges
+            // their full timeout, one reporting silence and the other a refusal.
             if (lv_tick_elaps(ctx->lastInviteSendMs) >= INVITE_RETRY_MS) {
                 ctx->lastInviteSendMs = now;
                 Packet invite {};
@@ -1120,8 +1149,9 @@ void tick(Context* ctx, uint32_t& nextHelloMs, uint32_t& networkTick) {
                 simulate(ctx);
             } else {
                 ctx->game.guestPaddleY = ctx->localPaddleY;
-                // State arrives at 20Hz and is never retransmitted, so the guest carries the ball
-                // on at the velocity it was last told rather than sitting still between packets.
+                // State arrives at 20Hz and is not retransmitted when lost, so the guest carries
+                // the ball on with the velocity it was last told. Without this the ball sits
+                // still between packets and stops dead on the first one that goes missing.
                 extrapolateBall(ctx);
 
                 // The Accept is an unacknowledged broadcast: repeat it until the host's first
@@ -1137,8 +1167,9 @@ void tick(Context* ctx, uint32_t& nextHelloMs, uint32_t& networkTick) {
                 }
             }
 
-            // 20Hz is enough for a paddle game and keeps the ESP-NOW send out of every frame.
-            // The tick that ends the match always sends, so the guest learns the result.
+            // Half of the ticks carry network traffic: 20Hz is enough for a paddle game
+            // and keeps the ESP-NOW send out of every frame. The tick that ends the match
+            // always sends, so the guest learns the result from the state it is waiting for.
             if ((networkTick++ % 2) == 0 || (ctx->isHost && ctx->game.over)) {
                 if (ctx->isHost) {
                     Packet packet = buildStatePacket(ctx);
@@ -1198,6 +1229,8 @@ void tick(Context* ctx, uint32_t& nextHelloMs, uint32_t& networkTick) {
             break;
     }
 }
+
+// endregion
 
 int32_t appMain(int argc, char* argv[]) {
     uint32_t appInstanceId = app_scheduler_current_app_id();

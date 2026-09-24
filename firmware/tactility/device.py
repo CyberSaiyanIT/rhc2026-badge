@@ -110,8 +110,9 @@ def write_partition_table(output_file, device_properties: dict, is_dev: bool):
     variant = "with-sd" if user_data_location == "SD" else "no-sd"
     partition_filename = f"partitions-{flash_size_number}mb-{variant}.csv"
     if get_boolean_property_or_false(device_properties, "apps.retroGo"):
-        # Retro-Go needs an app partition per application plus otadata, which only the -retrogo
-        # tables carry. No dev variant: the app partitions are fixed, not the data partition.
+        # Retro-Go needs an app partition per Retro-Go application plus otadata, which only the
+        # -retrogo tables carry. There is no dev variant: the smaller data partition a dev table
+        # implies is not what shrinks here, the app partitions are, and they are fixed.
         retrogo_partition_filename = f"partitions-{flash_size_number}mb-{variant}-retrogo.csv"
         if not os.path.isfile(retrogo_partition_filename):
             exit_with_error(f"apps.retroGo=true requires a partition table at {retrogo_partition_filename}")
@@ -189,6 +190,24 @@ def write_flash_variables(output_file, device_properties: dict):
     if esptool_flash_freq is not None:
         output_file.write(f"CONFIG_ESPTOOLPY_FLASHFREQ_{esptool_flash_freq}=y\n")
 
+    # FAT sector size, for the generated filesystem images and for the wear-levelling layer under
+    # the writable ones. Flash erases in 4096-byte blocks, so 512-byte sectors make the wear
+    # levelling emulate a 512-byte-writable device: every sector write reads the surrounding block,
+    # erases it and writes it back. 4096 removes that emulation, at the cost of a coarser
+    # allocation unit and of FatFs sizing its per-volume and per-file buffers off the larger
+    # sector. A device that selects 4096 needs a `system` partition of at least 256k: Data/system
+    # does not fit 128k at that sector size.
+    fat_sector_size = get_property_or_default(device_properties, "hardware.fatSectorSize", "512")
+    if fat_sector_size not in ("512", "4096"):
+        exit_with_error("hardware.fatSectorSize must be 512 or 4096")
+    output_file.write(f"CONFIG_FATFS_SECTOR_{fat_sector_size}=y\n")
+    output_file.write(f"CONFIG_WL_SECTOR_SIZE_{fat_sector_size}=y\n")
+    output_file.write(f"CONFIG_WL_SECTOR_SIZE={fat_sector_size}\n")
+    if fat_sector_size == "512":
+        # Only exists for 512-byte sectors: 4096 needs no store mode because it never emulates.
+        output_file.write("CONFIG_WL_SECTOR_MODE_SAFE=y\n")
+        output_file.write("CONFIG_WL_SECTOR_MODE=1\n")
+
 def write_spiram_variables(output_file, device_properties: dict):
     idf_target = get_property_or_exit(device_properties, "hardware.target").lower()
     has_spiram = get_property_or_exit(device_properties, "hardware.spiRam")
@@ -203,8 +222,9 @@ def write_spiram_variables(output_file, device_properties: dict):
     # to put some task stacks in SPIRAM (see UsbHidInput.cpp) - without it, xTaskCreateStatic()
     # asserts at runtime when handed a SPIRAM-backed stack buffer.
     output_file.write("CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y\n")
-    # The shared FreeRTOS timer daemon runs service ticks that touch LVGL, and an LVGL image
-    # header read alone puts a 4 kB buffer on the caller's stack. The 5 kB default cannot hold it.
+    # The FreeRTOS software timer daemon is shared by every Timer in the system, including
+    # service ticks that touch LVGL. LVGL's own image header read alone puts a four kilobyte
+    # work buffer on the caller's stack, which the 5 kB default cannot survive.
     output_file.write("CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=8192\n")
     output_file.write(f"CONFIG_{idf_target.upper()}_SPIRAM_SUPPORT=y\n")
     mode = get_property_or_exit(device_properties, "hardware.spiRamMode")
@@ -222,8 +242,19 @@ def write_spiram_variables(output_file, device_properties: dict):
     # Reduce IRAM usage
     output_file.write("CONFIG_SPIRAM_USE_MALLOC=y\n")
     output_file.write("CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y\n")
-    # Move mbedTLS allocations to SPIRAM: CONFIG_MBEDTLS_DYNAMIC_BUFFER re-allocates the ~16.4 kB
-    # TLS receive buffer around every read, which fails once internal RAM is fragmented.
+    # Every malloc() at or below this size is served from internal RAM, which on a device that
+    # runs out of internal RAM before it runs out of SPIRAM is the wrong trade: it is the many
+    # mid-sized allocations (std::string/std::vector, LVGL objects, FATFS and codec scratch) that
+    # consume the internal heap, not the few large ones. Lowering it moves those to SPIRAM at the
+    # cost of slower access. Anything that truly needs internal or DMA-capable memory asks for it
+    # by capability and is unaffected. Left at IDF's 16384 default when the property is absent.
+    always_internal = get_property_or_none(device_properties, "hardware.spiRamMallocAlwaysInternal")
+    if always_internal is not None:
+        output_file.write(f"CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL={always_internal}\n")
+    # Move mbedTLS allocations to SPIRAM. The default (INTERNAL) mode allocates from internal
+    # DRAM only, and CONFIG_MBEDTLS_DYNAMIC_BUFFER re-allocates the ~16.4 kB TLS receive buffer
+    # around every read, so a download fails mid-transfer with ALLOC_FAILED (-0x7F00) as soon as
+    # internal RAM is fragmented by something like the audio pipeline.
     # Dependency: CONFIG_SPIRAM_USE_CAPS_ALLOC || CONFIG_SPIRAM_USE_MALLOC (set above).
     output_file.write("CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y\n")
     # Performance improvements
@@ -259,8 +290,9 @@ def write_lvgl_variable_placeholders(output_file):
 
 def write_lvgl_variables(output_file, device_properties: dict):
     output_file.write("# LVGL\n")
-    # Lets the image decoders work on bytes already in memory, which is how cover art from a
-    # track's tags reaches them. The drive letter has no useful default, so memfs gets its own.
+    # Lets the image decoders work on bytes already in memory, which is how cover art lifted out
+    # of a track's tags reaches them. Without it the JPEG decoder only reads from a file.
+    # The letter has no default worth having, so memfs needs one of its own.
     output_file.write("CONFIG_LV_USE_FS_MEMFS=y\n")
     output_file.write("CONFIG_LV_FS_MEMFS_LETTER=77\n")
     if not has_group(device_properties, "lvgl") or not has_group(device_properties, "display"):

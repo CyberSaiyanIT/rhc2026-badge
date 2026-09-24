@@ -1,20 +1,27 @@
 # Name,   Type, SubType, Offset,   Size,   Flags
 # Note: if you have increased the bootloader size, make sure to update the offsets to avoid overlap
 #
-# Variant of partitions-16mb-no-sd.csv carrying Retro-Go, whose applications hand off by pointing
-# otadata at the next and rebooting, so each needs its own slot under the label it looks up.
-# Tactility keeps factory, which a blank otadata selects: that is the way back out of Retro-Go.
+# Variant of partitions-16mb-no-sd.csv that also carries Retro-Go. Retro-Go is a set of separate
+# ESP-IDF applications that hand off to each other by pointing otadata at the next one and
+# rebooting, so each needs an app partition of its own and the labels must match the names
+# Retro-Go looks them up by. Tactility keeps the factory slot: with otadata blank the bootloader
+# picks factory, which is what makes "reboot to factory" the way back out of Retro-Go.
 #
-# App partitions sit between factory and the FAT partitions because they must be 64k-aligned and
-# the data partition's size is not a multiple of 64k.
+# The app partitions sit between factory and the FAT partitions because app partitions must be
+# 64k-aligned and the data partition's size is not a multiple of 64k.
 nvs,        data, nvs,     0x9000,   0x6000,
 phy_init,   data, phy,     0xf000,   0x1000,
 factory,    app,  factory, 0x10000,  4M,
 # Sizes are measured, not inherited: Retro-Go's own numbers are tuned for the original ESP32 and
-# overflow as ESP32-S3 debug builds. Measured size, 64k-aligned, plus a slot of headroom.
+# every one of these overflows as an ESP32-S3 debug build. Each slot is the measured size rounded
+# up to the 64k app partitions must align to, plus a slot's worth of headroom. retrogo.sh checks
+# each build against these, because idf.py cannot - it sizes apps against the 4M factory
+# partition, not against the slot they are written to.
 launcher,   app,  ota_0,          ,  1152k,
 retro-core, app,  ota_1,          ,  1152k,
 prboom-go,  app,  ota_2,          ,  960k,
 otadata,    data, ota,            ,  8k,
-system,     data, fat,            ,  128k,
-data,       data, fat,            ,  8824k,
+# 256k, not the 128k the other tables use: this device builds its filesystem images with
+# 4096-byte sectors (hardware.fatSectorSize), and Data/system does not fit 128k at that size.
+system,     data, fat,            ,  256k,
+data,       data, fat,            ,  8696k,

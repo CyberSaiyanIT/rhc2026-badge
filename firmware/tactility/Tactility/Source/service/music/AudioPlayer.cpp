@@ -46,8 +46,10 @@ namespace {
 // Half a megabyte of decoded PCM: about 3 seconds at 44100/16/2, enough to ride out an SD card
 // read that stalls behind another task's flash access.
 constexpr size_t RING_BYTES = 512 * 1024;
-// Playback waits for the ring to be half full. Only what is needed to start: the pump refills
-// far faster than realtime, so a larger ring buys only silence after each press of play.
+// Playback waits for the ring to be half full, so the first underrun is not on the first frame.
+// Only what playback needs before it can start, not what keeps it going: the pump refills the
+// ring far faster than realtime, so half a megabyte here bought nothing but a second and a half
+// of silence after every press of play.
 constexpr size_t PREBUFFER_BYTES = RING_BYTES / 8;
 constexpr size_t PUMP_CHUNK_BYTES = 4096;
 // How long the prebuffer gate waits before it either starts under-filled or reports a failure.
@@ -71,13 +73,26 @@ bool hasExtension(const std::string& path, const char* extension) {
     return strcasecmp(path.c_str() + path.size() - length, extension) == 0;
 }
 
+/**
+ * Reports the least stack a task had left at any point since it started, so the sizes can be set
+ * against what playback costs rather than against the defaults. All of these stacks come out of
+ * internal RAM. A null @a task means the calling task.
+ */
+void log_stack_headroom(const char* name, TaskHandle_t task) {
+    LOG_I(TAG, "Stack headroom of %s: %u bytes",
+        name, (unsigned) (uxTaskGetStackHighWaterMark(task) * sizeof(StackType_t)));
+}
+
 }
 
 struct AudioPlayer::Impl {
     Device* audioDevice = nullptr;
     /**
-     * The controller the codec is wired to, held only to read its underrun count. Found by type
-     * rather than followed from the codec; a board with two I2S controllers would need that route.
+     * The controller the codec is wired to, held only to read its underrun count.
+     *
+     * Found by type rather than followed from the codec: reaching it that way would need an
+     * accessor on every layer in between for a number only the diagnostics want. A board with
+     * more than one I2S controller would have to take that longer route.
      */
     Device* i2sDevice = nullptr;
     AudioStreamHandle output = nullptr;
@@ -130,8 +145,9 @@ struct AudioPlayer::Impl {
     float speed = 1.0f;
 
     /**
-     * Everything downstream of the ring buffer. Not ESP-ADF elements: a change here is heard
-     * within one chunk, where an element's change sits behind the whole ring buffer.
+     * Everything downstream of the ring buffer. Deliberately not ESP-ADF pipeline elements: a
+     * change made here is heard within one chunk, where the same change made to an element sits
+     * behind the whole ring buffer before it reaches the codec.
      */
     AudioEffects effects;
     /** Whether the end-of-track fade has already been asked for, so it is only asked for once. */
@@ -156,6 +172,8 @@ struct AudioPlayer::Impl {
     static void outputTaskMain(void* context);
 };
 
+// region Pipeline
+
 bool AudioPlayer::Impl::buildPipeline(const std::string& path) {
     audio_pipeline_cfg_t pipeline_config = DEFAULT_AUDIO_PIPELINE_CONFIG();
     pipeline = audio_pipeline_init(&pipeline_config);
@@ -167,15 +185,21 @@ bool AudioPlayer::Impl::buildPipeline(const std::string& path) {
     fatfs_stream_cfg_t reader_config = FATFS_STREAM_CFG_DEFAULT();
     reader_config.type = AUDIO_STREAM_READER;
     // ESP-ADF's 4096 covers its own element loop, not what the loop calls into: every read runs
-    // f_read -> FATFS -> ff_sdmmc_read -> the SDMMC driver on this same stack.
-    reader_config.task_stack = 8192;
+    // f_read -> FATFS -> ff_sdmmc_read -> the SDMMC driver on this same stack. Measured peak over
+    // a full track is 2312 bytes, so this keeps well over double that rather than the 4 kB that
+    // was not enough.
+    reader_config.task_stack = 6144;
     reader = fatfs_stream_init(&reader_config);
 
-    // Element task stacks stay in internal RAM. ESP-ADF defaults them to external, which needs an
-    // IDF patch only ADF ships; without it every element silently fails to start.
+    // Every element's task stack stays in internal RAM. ESP-ADF defaults these to external RAM,
+    // which needs the xTaskCreateRestrictedPinnedToCore that only ADF's own IDF patch adds; without
+    // it each element silently fails to start and the pipeline produces nothing.
     if (hasExtension(path, ".mp3")) {
         mp3_decoder_cfg_t decoder_config = DEFAULT_MP3_DECODER_CONFIG();
         decoder_config.stack_in_ext = false;
+        // Measured peak 2484 bytes, against ESP-ADF's 5120. The AAC decoder below keeps its own
+        // default: only the MP3 path has been measured.
+        decoder_config.task_stack = 4096;
         decoder = mp3_decoder_init(&decoder_config);
     } else {
         aac_decoder_cfg_t decoder_config = DEFAULT_AAC_DECODER_CONFIG();
@@ -187,10 +211,14 @@ bool AudioPlayer::Impl::buildPipeline(const std::string& path) {
     sonic_config.sonic_info.samplerate = (int) sampleRate.load();
     sonic_config.sonic_info.channel = (int) channels.load();
     sonic_config.stack_in_ext = false;
+    // Measured peak 2000 bytes.
+    sonic_config.task_stack = 3072;
     sonic = sonic_init(&sonic_config);
 
     alc_volume_setup_cfg_t alc_config = DEFAULT_ALC_VOLUME_SETUP_CONFIG();
     alc_config.stack_in_ext = false;
+    // Measured peak 1988 bytes.
+    alc_config.task_stack = 3072;
     alc = alc_volume_setup_init(&alc_config);
 
     raw_stream_cfg_t raw_config = RAW_STREAM_CFG_DEFAULT();
@@ -239,12 +267,23 @@ void AudioPlayer::Impl::teardownPipeline() {
         return;
     }
 
+    // Before the stop: the element tasks are deleted by it, and their stacks go with them.
+    // By name because ESP-ADF keeps an element's task handle private to the element, and runs
+    // the task under the tag that buildPipeline() registered.
+    for (const char* tag : { "file", "dec", "sonic", "alc" }) {
+        TaskHandle_t task = xTaskGetHandle(tag);
+        if (task != nullptr) {
+            log_stack_headroom(tag, task);
+        }
+    }
+
     audio_pipeline_stop(pipeline);
     audio_pipeline_wait_for_stop(pipeline);
     audio_pipeline_terminate(pipeline);
 
-    // buildPipeline() leaves unreached elements null and play() still tears down, so each is
-    // checked: audio_element_deinit() dereferences the handle before testing it.
+    // buildPipeline() leaves the elements it never got to as nullptr and play() still tears down,
+    // so every element is checked here. audio_element_deinit() dereferences the handle before it
+    // tests anything, which turns an element that failed to allocate into a crash.
     for (audio_element_handle_t element : { reader, decoder, sonic, alc, raw }) {
         if (element != nullptr) {
             audio_pipeline_unregister(pipeline, element);
@@ -315,12 +354,17 @@ void AudioPlayer::Impl::applyMusicInfo() {
     LOG_I(TAG, "Source: %d Hz, %d ch, %d bps", info.sample_rates, info.channels, info.bps);
 }
 
+// endregion
+
+// region Tasks
+
 // Drains decoded PCM out of the pipeline into the ring buffer. Kept separate from the output task
 // so a slow read never blocks the write to the codec.
 void AudioPlayer::Impl::pumpTaskMain(void* context) {
     auto* impl = static_cast<Impl*>(context);
-    // External RAM: this task only copies pipeline output into the ring, so the slower access
-    // does not matter, and internal RAM is where app stacks come from.
+    // External RAM: this task only copies the pipeline's output into the ring, so nothing here
+    // touches the buffer often enough for the slower access to matter, and internal RAM is what
+    // an app's 16 kB stack has to come from.
     auto* chunk = (uint8_t*) heap_caps_malloc(PUMP_CHUNK_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
     if (chunk == nullptr) {
@@ -372,8 +416,8 @@ void AudioPlayer::Impl::pumpTaskMain(void* context) {
             break;
         }
 
-        // A timeout only means no data was ready yet. Treating it as fatal kills this task and
-        // leaves playback buffering for ever.
+        // A timeout only means no data was ready yet. Treating it as fatal here is what previously
+        // killed this task and left playback buffering forever.
         if (read != AEL_IO_TIMEOUT) {
             LOG_E(TAG, "Pipeline read failed (%d)", read);
             impl->sourceDrained = true;
@@ -382,6 +426,7 @@ void AudioPlayer::Impl::pumpTaskMain(void* context) {
     }
 
     heap_caps_free(chunk);
+    log_stack_headroom("mp_pump", nullptr);
     impl->pumpTask = nullptr;
     vTaskDelete(nullptr);
 }
@@ -404,8 +449,8 @@ uint8_t level_from_sum(uint64_t sum_squares, size_t count) {
     return (uint8_t) std::clamp((db - LEVEL_FLOOR_DB) / -LEVEL_FLOOR_DB * 255.0f, 0.0f, 255.0f);
 }
 
-// Metered here, not at the decoder: the ring holds seconds of audio, so a level taken where the
-// PCM is produced would run that far ahead of what is heard.
+// Metered here rather than on the decoder side: the ring holds seconds of decoded audio, so a
+// level taken where the PCM is produced would run that far ahead of what is being heard.
 /** @return the per-sample coefficient of a one-pole low-pass at @a corner_hz */
 float one_pole_coefficient(float corner_hz, uint32_t sample_rate) {
     if (sample_rate == 0) {
@@ -605,12 +650,17 @@ void AudioPlayer::Impl::outputTaskMain(void* context) {
 
     impl->effects.release();
     heap_caps_free(chunk);
+    log_stack_headroom("mp_out", nullptr);
     if (impl->sourceDrained.load()) {
         impl->state = State::Stopped;
     }
     impl->outputTask = nullptr;
     vTaskDelete(nullptr);
 }
+
+// endregion
+
+// region AudioPlayer
 
 AudioPlayer::AudioPlayer() : impl(new Impl()) {
     device_get_first_active_by_type(&AUDIO_STREAM_TYPE, &impl->audioDevice);
@@ -706,9 +756,11 @@ bool AudioPlayer::play(const std::string& path) {
         return false;
     }
 
-    // Both stacks come out of internal RAM, which is the resource most likely to be exhausted here.
+    // Both stacks come out of internal RAM, which is the resource most likely to be exhausted here,
+    // so both are sized from their measured peaks: 2060 bytes for the pump, 2512 for the output
+    // task, which carries the effects chain and the level metering on top of the same copy loop.
     // Left unchecked, a failed create leaves running == true with nothing driving the pipeline.
-    if (xTaskCreate(Impl::pumpTaskMain, "mp_pump", 4096, impl, 6, &impl->pumpTask) != pdPASS) {
+    if (xTaskCreate(Impl::pumpTaskMain, "mp_pump", 3072, impl, 6, &impl->pumpTask) != pdPASS) {
         LOG_E(TAG, "Failed to create pump task");
         impl->pumpTask = nullptr;
         impl->running = false;
@@ -716,7 +768,7 @@ bool AudioPlayer::play(const std::string& path) {
         impl->state = State::Error;
         return false;
     }
-    if (xTaskCreate(Impl::outputTaskMain, "mp_out", 4096, impl, 6, &impl->outputTask) != pdPASS) {
+    if (xTaskCreate(Impl::outputTaskMain, "mp_out", 3584, impl, 6, &impl->outputTask) != pdPASS) {
         LOG_E(TAG, "Failed to create output task");
         impl->outputTask = nullptr;
         impl->running = false;
@@ -867,5 +919,7 @@ Telemetry AudioPlayer::getTelemetry() const {
 
     return telemetry;
 }
+
+// endregion
 
 }
