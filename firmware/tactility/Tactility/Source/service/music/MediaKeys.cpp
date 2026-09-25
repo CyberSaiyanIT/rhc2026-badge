@@ -21,6 +21,8 @@ constexpr uint32_t KEY_NEXT = 0x20002;
  * checked against the front window, so a killed app cannot leave the keys claimed.
  */
 std::atomic<uint32_t> claimedBy { 0 };
+std::atomic<MediaKeyHandlerFn> handlerFunction { nullptr };
+std::atomic<void*> handlerContext { nullptr };
 std::atomic<bool> enabled { false };
 std::atomic<uint8_t> pending { (uint8_t) MediaCommand::None };
 
@@ -42,7 +44,8 @@ bool onKey(uint32_t key, bool pressed, void* /*context*/) {
     // Left for the app: it has its own use for this key, or a richer one than transport control.
     const uint32_t claim = claimedBy.load();
     if (claim != 0 && claim == window_manager_get_topmost_app()) {
-        return false;
+        const auto handler = handlerFunction.load();
+        return handler != nullptr && handler(key, pressed, handlerContext.load());
     }
 
     if (!enabled.load()) {
@@ -80,11 +83,23 @@ void claimMediaKeys(uint32_t appInstanceId) {
     claimedBy = appInstanceId;
 }
 
+void setMediaKeyHandler(uint32_t appInstanceId, MediaKeyHandlerFn handler, void* context) {
+    if (claimedBy.load() != appInstanceId) {
+        return;
+    }
+    // Context first, so the LVGL task can never read the new handler against the old context.
+    handlerContext = context;
+    handlerFunction = handler;
+}
+
 void releaseMediaKeys(uint32_t appInstanceId) {
     // Compared before clearing, so an app closing after another has already claimed the keys
     // does not take them away from it.
     uint32_t expected = appInstanceId;
-    claimedBy.compare_exchange_strong(expected, 0);
+    if (claimedBy.compare_exchange_strong(expected, 0)) {
+        handlerFunction = nullptr;
+        handlerContext = nullptr;
+    }
 }
 
 } // namespace tt::service::music

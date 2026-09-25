@@ -118,6 +118,8 @@ static uint32_t scan_key(RomhackKeypadInternal* internal, uint32_t* out_physical
     // Whether the focused widget uses left and right itself, rather than leaving them to walk
     // the focus ring. A slider always does; anything else says so with LV_OBJ_FLAG_USER_1.
     bool horizontal_keys = false;
+    // The same for up and down, claimed with LV_OBJ_FLAG_USER_2.
+    bool vertical_keys = false;
     lv_indev_t* indev = lv_indev_get_next(nullptr);
     while (indev) {
         if (lv_indev_get_type(indev) == LV_INDEV_TYPE_KEYPAD) {
@@ -138,6 +140,9 @@ static uint32_t scan_key(RomhackKeypadInternal* internal, uint32_t* out_physical
                                lv_obj_has_flag(focused, LV_OBJ_FLAG_USER_1)) {
                         horizontal_keys = true;
                     }
+                    if (lv_obj_has_flag(focused, LV_OBJ_FLAG_USER_2)) {
+                        vertical_keys = true;
+                    }
                 }
             }
         }
@@ -149,8 +154,8 @@ static uint32_t scan_key(RomhackKeypadInternal* internal, uint32_t* out_physical
     diag_slider_focused = horizontal_keys;
 
     bool use_dir = editing || dropdown_open;
-    if (pressed0 & P0_UP) return use_dir ? LV_KEY_UP : LV_KEY_PREV;
-    if (pressed0 & P0_DOWN) return use_dir ? LV_KEY_DOWN : LV_KEY_NEXT;
+    if (pressed0 & P0_UP) return (use_dir || vertical_keys) ? LV_KEY_UP : LV_KEY_PREV;
+    if (pressed0 & P0_DOWN) return (use_dir || vertical_keys) ? LV_KEY_DOWN : LV_KEY_NEXT;
     if (pressed0 & P0_LEFT) return (use_dir || horizontal_keys) ? LV_KEY_LEFT : LV_KEY_PREV;
     if (pressed0 & P0_RIGHT) return (use_dir || horizontal_keys) ? LV_KEY_RIGHT : LV_KEY_NEXT;
     if (pressed1 & P1_A1) return LV_KEY_ENTER;

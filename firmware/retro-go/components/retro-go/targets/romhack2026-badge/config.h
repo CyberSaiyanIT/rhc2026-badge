@@ -18,6 +18,7 @@
 // AW9523B pins, in the flat 0-15 numbering rg_i2c.c uses (P0.x = x, P1.x = 8 + x).
 #define BADGE_EXP_SPEAKER_SD        7   // P0.7, amplifier shutdown: driven LOW to play
 #define BADGE_EXP_BOOST_5V          10  // P1.2, 5V boost feeding the speaker amp and the LEDs
+#define BADGE_EXP_NEOPIXEL_EN       15  // P1.7, LED strip power switch
 #define BADGE_EXP_LCD_RST           14  // P1.6, ILI9341 reset
 
 #define RG_POWER_RAIL_SUPPLY { \
@@ -31,8 +32,12 @@
 #define RG_AUDIO_USE_SPEAKER        1   // 0 = Disable, 1 = Enable
 #define RG_AUDIO_USE_HEADPHONES     1   // 0 = Disable, 1 = Enable
 
+// rg_i2c_gpio_init() software-resets the expander and leaves every pin an input, so the LED strip's
+// switch is driven off here rather than left to whatever its gate settles at.
 #define RG_CUSTOM_PLATFORM_INIT()                                        \
     rg_i2c_gpio_init();                                                  \
+    rg_i2c_gpio_set_level(BADGE_EXP_NEOPIXEL_EN, 0);                     \
+    rg_i2c_gpio_set_direction(BADGE_EXP_NEOPIXEL_EN, RG_GPIO_OUTPUT);    \
     rg_i2c_gpio_set_level(BADGE_EXP_LCD_RST, 0);                         \
     rg_i2c_gpio_set_direction(BADGE_EXP_LCD_RST, RG_GPIO_OUTPUT);        \
     rg_usleep(100 * 1000);                                               \

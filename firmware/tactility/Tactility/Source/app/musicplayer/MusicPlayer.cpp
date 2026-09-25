@@ -15,6 +15,7 @@
 #include <lvgl.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <sys/stat.h>
 #include <format>
@@ -36,10 +37,15 @@ constexpr uint32_t KEY_MEDIA_PLAY_PAUSE = 0x20000;
 constexpr uint32_t KEY_MEDIA_PREV = 0x20001;
 constexpr uint32_t KEY_MEDIA_NEXT = 0x20002;
 
-constexpr int SEEK_STEP_SECONDS = 10;
-// How long a prev/next press waits to see whether it is a hold rather than a tap.
-constexpr uint32_t HOLD_THRESHOLD_MS = 350;
-constexpr float VOLUME_STEP_PERCENT = 10.0f;
+constexpr float VOLUME_STEP_PERCENT = 5.0f;
+// What full scale on screen asks of the codec. Above this the amplifier distorts.
+constexpr float VOLUME_SOFT_MAX = 95.0f;
+// Volume is counted in whole steps rather than percent: the codec quantises what it is given, so
+// reading a percentage back and stepping that drifts off the grid within a press or two.
+constexpr float VOLUME_CODEC_STEP = VOLUME_SOFT_MAX * VOLUME_STEP_PERCENT / 100.0f;
+constexpr int VOLUME_STEPS = (int) (100.0f / VOLUME_STEP_PERCENT);
+// How long a list row holds still before its text starts scrolling.
+constexpr uint32_t LIST_SCROLL_DELAY_MS = 1500;
 // How long a change waits before it reaches flash. Long enough to coalesce a slider drag, short
 // enough that a badge unplugged mid-session keeps what was set.
 constexpr uint32_t SETTINGS_FLUSH_MS = 2000;
@@ -127,10 +133,8 @@ struct Context {
     int artWaits = 0;
 
     lv_timer_t* refreshTimer = nullptr;
-    /** Distinguishes a tap from a hold on the dedicated prev/next keys. */
-    lv_timer_t* holdTimer = nullptr;
-    uint32_t pendingKey = 0;
-    bool keyHeld = false;
+    /** The media key that is down, so holding it acts only once. */
+    uint32_t heldKey = 0;
 };
 
 std::string fileName(const std::string& path) {
@@ -264,19 +268,24 @@ void showTrack(Context* ctx) {
 void showPage(Context* ctx, Page page);
 void releaseArt(Context* ctx);
 
-void adjustVolume(float delta) {
+int volumeStep() {
+    return (int) std::lround(service::audio::getOutputVolume() / VOLUME_CODEC_STEP);
+}
+
+void adjustVolume(int steps) {
     if (!service::audio::isOutputAvailable()) {
         return;
     }
-    const float volume = std::clamp(service::audio::getOutputVolume() + delta, 0.0f, 100.0f);
-    service::audio::setOutputVolume(volume);
+    const int target = std::clamp(volumeStep() + steps, 0, VOLUME_STEPS);
+    service::audio::setOutputVolume((float) target * VOLUME_CODEC_STEP);
 }
 
 std::string volumeText() {
     if (!service::audio::isOutputAvailable()) {
         return std::string(LV_SYMBOL_MUTE);
     }
-    return std::format("{} {}", LV_SYMBOL_VOLUME_MAX, (int) (service::audio::getOutputVolume() + 0.5f));
+    const int shown = std::min(volumeStep(), VOLUME_STEPS) * (int) VOLUME_STEP_PERCENT;
+    return std::format("{} {}", LV_SYMBOL_VOLUME_MAX, shown);
 }
 
 constexpr lv_color_t accent() { return lv_color_hex(0x4F8CFF); }
@@ -443,71 +452,50 @@ void refresh(lv_timer_t* timer) {
     lv_label_set_text(ctx->durationLabel, duration > 0 ? formatTime(duration).c_str() : "--:--");
 }
 
-// A tap on prev/next changes track, holding seeks. LVGL reports a held key as repeated KEY
-// events, so the first press is deferred just long enough to see whether a repeat follows.
-void onHoldElapsed(lv_timer_t* timer) {
-    auto* ctx = static_cast<Context*>(lv_timer_get_user_data(timer));
-    if (!ctx->keyHeld) {
-        if (ctx->pendingKey == KEY_MEDIA_NEXT) {
-            music::next();
-        } else if (ctx->pendingKey == KEY_MEDIA_PREV) {
-            music::previous();
-        }
+void showVolume(Context* ctx) {
+    if (ctx->volumeButton != nullptr) {
+        lv_label_set_text(lv_obj_get_child(ctx->volumeButton, 0), volumeText().c_str());
     }
-    ctx->pendingKey = 0;
-    ctx->keyHeld = false;
-    lv_timer_delete(ctx->holdTimer);
-    ctx->holdTimer = nullptr;
 }
 
-bool volumeChipFocused(Context* ctx) {
-    lv_group_t* group = lv_group_get_default();
-    return ctx->volumeButton != nullptr && group != nullptr &&
-        lv_group_get_focused(group) == ctx->volumeButton;
-}
+/**
+ * Every media key as it happens, taken ahead of LVGL so no widget has to be focused to reach
+ * playback. The keypad driver repeats a key for as long as it is down, so only the transition to
+ * a new key acts. Runs on the LVGL task with the lock held.
+ */
+bool onMediaKey(uint32_t key, bool pressed, void* context) {
+    auto* ctx = static_cast<Context*>(context);
+    const bool media = key == KEY_MEDIA_PLAY_PAUSE || key == KEY_MEDIA_NEXT || key == KEY_MEDIA_PREV;
 
-void onTransportKey(Context* ctx, uint32_t key) {
+    if (!pressed) {
+        ctx->heldKey = 0;
+        return media;
+    }
+    if (!media || ctx->heldKey == key) {
+        return media;
+    }
+
+    ctx->heldKey = key;
     if (key == KEY_MEDIA_PLAY_PAUSE) {
         music::playPause();
-        return;
-    }
-
-    // With the volume chip selected, next and previous become louder and quieter.
-    if (volumeChipFocused(ctx)) {
-        adjustVolume(key == KEY_MEDIA_NEXT ? VOLUME_STEP_PERCENT : -VOLUME_STEP_PERCENT);
-        lv_label_set_text(lv_obj_get_child(ctx->volumeButton, 0), volumeText().c_str());
-        return;
-    }
-
-    if (ctx->pendingKey == key && ctx->holdTimer != nullptr) {
-        // A repeat: the key is being held, so seek instead of changing track.
-        ctx->keyHeld = true;
-        const auto position = music::getTelemetry().positionSeconds;
-        if (key == KEY_MEDIA_NEXT) {
-            music::seek(position + SEEK_STEP_SECONDS);
-        } else {
-            music::seek(position > SEEK_STEP_SECONDS ? position - SEEK_STEP_SECONDS : 0);
-        }
-        return;
-    }
-
-    ctx->pendingKey = key;
-    ctx->keyHeld = false;
-    if (ctx->holdTimer == nullptr) {
-        ctx->holdTimer = lv_timer_create(onHoldElapsed, HOLD_THRESHOLD_MS, ctx);
-        lv_timer_set_repeat_count(ctx->holdTimer, 1);
+    } else if (key == KEY_MEDIA_NEXT) {
+        music::next();
     } else {
-        lv_timer_reset(ctx->holdTimer);
+        music::previous();
     }
+    return true;
 }
 
-void onMediaKey(lv_event_t* event) {
+// Up and down are volume wherever the player page has the focus; the chips claim them from the
+// keypad driver with LV_OBJ_FLAG_USER_2 so they never walk the focus ring here.
+void onDirectionKey(lv_event_t* event) {
     auto* ctx = static_cast<Context*>(lv_event_get_user_data(event));
     const uint32_t key = lv_event_get_key(event);
-    if (key == KEY_MEDIA_PLAY_PAUSE || key == KEY_MEDIA_NEXT || key == KEY_MEDIA_PREV) {
-        LOG_D(TAG, "Media key %lu", key);
-        onTransportKey(ctx, key);
+    if (key != LV_KEY_UP && key != LV_KEY_DOWN) {
+        return;
     }
+    adjustVolume(key == LV_KEY_UP ? 1 : -1);
+    showVolume(ctx);
 }
 
 // Focus reads as a ring drawn inside the widget. The theme's default is an outline, which is
@@ -529,6 +517,7 @@ lv_obj_t* createChip(lv_obj_t* parent, const char* symbol, lv_event_cb_t callbac
     lv_obj_set_style_border_width(chip, 0, LV_PART_MAIN);
 
     styleFocusRing(chip);
+    lv_obj_add_flag(chip, LV_OBJ_FLAG_USER_2);
 
     auto* label = lv_label_create(chip);
     lv_label_set_text(label, symbol);
@@ -579,8 +568,8 @@ void onSpeakerClicked(lv_event_t* e) {
 // Clicking cycles the volume so it is reachable without the media keys too.
 void onVolumeClicked(lv_event_t* e) {
     auto* ctx = static_cast<Context*>(lv_event_get_user_data(e));
-    adjustVolume(VOLUME_STEP_PERCENT);
-    lv_label_set_text(lv_obj_get_child(ctx->volumeButton, 0), volumeText().c_str());
+    adjustVolume(1);
+    showVolume(ctx);
 }
 
 void onDspClicked(lv_event_t* e) { showPage(static_cast<Context*>(lv_event_get_user_data(e)), Page::Dsp); }
@@ -904,8 +893,8 @@ void buildPlayerPage(Context* ctx, lv_obj_t* parent) {
     ctx->bufferBar = lv_bar_create(parent);
     styleProgressBar(ctx->bufferBar, 3, lv_color_hex(0x5A6070), LV_OPA_30);
 
-    // Transport has no on-screen buttons: play/pause, previous and next are physical keys, and
-    // holding previous or next seeks. Only what has no key of its own stays on screen.
+    // Transport has no on-screen buttons: play/pause, previous and next are physical keys. Only
+    // what has no key of its own stays on screen.
     auto* chips = createRow(parent, LV_FLEX_ALIGN_CENTER, 4);
     lv_obj_set_style_pad_bottom(chips, 2, LV_PART_MAIN);
     const auto repeat = music::getRepeat();
@@ -941,6 +930,30 @@ void movePickerHighlight(Context* ctx, int current) {
     const uint32_t rows = lv_obj_get_child_count(ctx->trackList);
     for (uint32_t row = 0; row < rows; row++) {
         styleTrackRow(lv_obj_get_child(ctx->trackList, row), (int) row == current);
+    }
+}
+
+/** Held by the label's style, so it outlives the rows it is applied to. */
+const lv_anim_t* listScrollAnim() {
+    static lv_anim_t anim;
+    static bool ready = false;
+    if (!ready) {
+        lv_anim_init(&anim);
+        lv_anim_set_delay(&anim, LIST_SCROLL_DELAY_MS);
+        lv_anim_set_repeat_delay(&anim, LIST_SCROLL_DELAY_MS);
+        // Copied over the label's own animation, which would otherwise stop after one pass.
+        lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
+        ready = true;
+    }
+    return &anim;
+}
+
+void delayRowScroll(lv_obj_t* row) {
+    for (uint32_t child = 0; child < lv_obj_get_child_count(row); child++) {
+        auto* object = lv_obj_get_child(row, child);
+        if (lv_obj_check_type(object, &lv_label_class)) {
+            lv_obj_set_style_anim(object, listScrollAnim(), LV_PART_MAIN);
+        }
     }
 }
 
@@ -996,7 +1009,7 @@ void onLibraryClicked(lv_event_t* event) {
 
     if (entry->isFolder) {
         ctx->libraryDir = entry->path;
-        showPage(ctx, Page::Library);
+        scheduleRebuild(ctx, Page::Library);
         return;
     }
 
@@ -1081,11 +1094,13 @@ void buildLibraryPage(Context* ctx, lv_obj_t* parent) {
         createCaption(parent, emptyReason().c_str());
     } else {
         auto* list = createRowList(parent, ctx);
+        lv_obj_t* first_row = nullptr;
         for (size_t index = 0; index < ctx->libraryEntries.size(); index++) {
             const auto& entry = ctx->libraryEntries[index];
             auto* button = lv_list_add_button(list, LV_SYMBOL_AUDIO, entry.name.c_str());
             styleLibraryRow(button, entry, music::isQueued(entry.path));
             styleFocusRing(button);
+            delayRowScroll(button);
             lv_obj_set_user_data(button, (void*) (uintptr_t) index);
             // Claims left and right for itself, which the keypad driver reads to stop them
             // walking the focus ring while this row is focused.
@@ -1093,7 +1108,11 @@ void buildLibraryPage(Context* ctx, lv_obj_t* parent) {
             lv_obj_add_event_cb(button, onLibraryClicked, LV_EVENT_CLICKED, ctx);
             lv_obj_add_event_cb(button, onLibraryKey, LV_EVENT_KEY, ctx);
             addBubbling(button);
+            if (first_row == nullptr) {
+                first_row = button;
+            }
         }
+        lv_group_focus_obj(first_row);
     }
 
     // No Queue or Player rows: back reaches both, and on a 320x240 screen two more full-width
@@ -1137,6 +1156,7 @@ void buildQueuePage(Context* ctx, lv_obj_t* parent) {
             auto* button = lv_list_add_button(list, LV_SYMBOL_AUDIO, name.c_str());
             styleTrackRow(button, index == current);
             styleFocusRing(button);
+            delayRowScroll(button);
             lv_obj_set_user_data(button, (void*) (uintptr_t) index);
             lv_obj_add_flag(button, LV_OBJ_FLAG_USER_1);
             lv_obj_add_event_cb(button, onQueueClicked, LV_EVENT_CLICKED, ctx);
@@ -1389,8 +1409,8 @@ void populate(lv_obj_t* root, void* userData) {
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, LV_PART_MAIN);
 
     // Re-registering on every rebuild would stack duplicate handlers on the same root.
-    lv_obj_remove_event_cb_with_user_data(root, onMediaKey, ctx);
-    lv_obj_add_event_cb(root, onMediaKey, LV_EVENT_KEY, ctx);
+    lv_obj_remove_event_cb_with_user_data(root, onDirectionKey, ctx);
+    lv_obj_add_event_cb(root, onDirectionKey, LV_EVENT_KEY, ctx);
 
     if (ctx->page == Page::Player) {
         buildPlayerPage(ctx, root);
@@ -1423,6 +1443,7 @@ int32_t appMain(int argc, char* argv[]) {
     }
 
     music::claimMediaKeys(appInstanceId);
+    music::setMediaKeyHandler(appInstanceId, onMediaKey, &ctx);
 
     TaskEventGroup event_group {};
     task_event_group_construct(&event_group);

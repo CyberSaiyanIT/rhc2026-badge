@@ -104,6 +104,8 @@ struct PngRowWriter {
     size_t rowStride; // unfiltered scanline bytes, excluding the leading filter byte
     size_t rowFilled; // bytes of the current scanline (filter byte included) received so far
     uint32_t row;
+    /** RGB triples from PLTE, used only when bytesPerPixel is 1. */
+    uint8_t* palette;
 };
 
 uint8_t paethPredictor(uint8_t a, uint8_t b, uint8_t c) {
@@ -138,7 +140,7 @@ bool writeRow(PngRowWriter& writer) {
 
     uint8_t* out = writer.dest + static_cast<size_t>(writer.row) * writer.width * 2;
     for (uint32_t x = 0; x < writer.width; ++x) {
-        const uint8_t* pixel = data + x * bpp;
+        const uint8_t* pixel = (bpp == 1) ? writer.palette + data[x] * 3 : data + x * bpp;
         const uint16_t rgb565 = ((pixel[0] & 0xF8) << 8) | ((pixel[1] & 0xFC) << 3) | (pixel[2] >> 3);
         out[x * 2] = static_cast<uint8_t>(rgb565 & 0xFF);
         out[x * 2 + 1] = static_cast<uint8_t>(rgb565 >> 8);
@@ -192,6 +194,7 @@ bool decodePng(Context* ctx, const char* path) {
     bool failed = false;
     bool done = false;
     bool inflated = false;
+    bool havePalette = false;
 
     while (!failed && !done) {
         uint8_t chunk_header[8];
@@ -212,14 +215,15 @@ bool decodePng(Context* ctx, const char* path) {
             }
             const uint8_t bit_depth = ihdr[8];
             const uint8_t color_type = ihdr[9];
-            if (bit_depth != 8 || (color_type != 2 && color_type != 6) || ihdr[12] != 0) {
+            if (bit_depth != 8 || (color_type != 2 && color_type != 3 && color_type != 6) || ihdr[12] != 0) {
                 LOG_E(TAG, "Unsupported PNG (depth=%u colorType=%u interlace=%u)", bit_depth, color_type, ihdr[12]);
                 failed = true;
                 break;
             }
             writer.width = readBigEndian32(ihdr);
             writer.height = readBigEndian32(ihdr + 4);
-            writer.bytesPerPixel = (color_type == 6) ? 4 : 3;
+            // Palette entries are one byte; the RGB they stand for comes from PLTE below.
+            writer.bytesPerPixel = (color_type == 6) ? 4 : (color_type == 3 ? 1 : 3);
             writer.rowStride = static_cast<size_t>(writer.width) * writer.bytesPerPixel;
 
             // Plain working memory, never DMA. Left to malloc the three smaller ones land in
@@ -229,7 +233,13 @@ bool decodePng(Context* ctx, const char* path) {
             writer.previous = static_cast<uint8_t*>(allocPreferExternal(writer.rowStride));
             decompressor = static_cast<tinfl_decompressor*>(allocPreferExternal(sizeof(tinfl_decompressor)));
             dictionary = static_cast<uint8_t*>(allocPreferExternal(TINFL_LZ_DICT_SIZE));
-            if (writer.dest == nullptr || writer.current == nullptr || writer.previous == nullptr || decompressor == nullptr || dictionary == nullptr) {
+            if (color_type == 3) {
+                writer.palette = static_cast<uint8_t*>(allocPreferExternal(256 * 3));
+                if (writer.palette != nullptr) {
+                    memset(writer.palette, 0, 256 * 3);
+                }
+            }
+            if (writer.dest == nullptr || writer.current == nullptr || writer.previous == nullptr || decompressor == nullptr || dictionary == nullptr || (color_type == 3 && writer.palette == nullptr)) {
                 LOG_E(TAG, "Out of memory for %ux%u map", writer.width, writer.height);
                 failed = true;
                 break;
@@ -237,9 +247,27 @@ bool decodePng(Context* ctx, const char* path) {
             memset(writer.previous, 0, writer.rowStride); // allocPreferExternal does not zero
             tinfl_init(decompressor);
             chunk_size = 0;
+        } else if (memcmp(type, "PLTE", 4) == 0 && writer.palette != nullptr) {
+            if (chunk_size > 256 * 3 || chunk_size % 3 != 0) {
+                LOG_E(TAG, "Bad PLTE (%lu bytes)", (unsigned long) chunk_size);
+                failed = true;
+                break;
+            }
+            if (fread(writer.palette, 1, chunk_size, file) != chunk_size) {
+                LOG_E(TAG, "Truncated PLTE");
+                failed = true;
+                break;
+            }
+            havePalette = true;
+            chunk_size = 0;
         } else if (memcmp(type, "IDAT", 4) == 0) {
             if (writer.dest == nullptr) {
                 LOG_E(TAG, "IDAT before IHDR");
+                failed = true;
+                break;
+            }
+            if (writer.bytesPerPixel == 1 && !havePalette) {
+                LOG_E(TAG, "Indexed PNG without a palette");
                 failed = true;
                 break;
             }
@@ -293,6 +321,7 @@ bool decodePng(Context* ctx, const char* path) {
     }
 
     fclose(file);
+    heap_caps_free(writer.palette);
     heap_caps_free(writer.current);
     heap_caps_free(writer.previous);
     heap_caps_free(decompressor);

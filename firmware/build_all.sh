@@ -81,7 +81,9 @@ if [ "$do_clean" = true ]; then
 fi
 
 echo "==> Tactility"
-run_in "$TACTILITY" /project "python device.py '$TARGET' && idf.py build"
+# lark is the devicetree compiler's parser and is not declared anywhere ESP-IDF would install it.
+run_in "$TACTILITY" /project "python -c 'import lark' 2>/dev/null || pip install -q lark; \
+  python device.py '$TARGET' && idf.py build"
 
 echo "==> Retro-Go (${APPS[*]})"
 run_in "$RETRO_GO" /retro-go "python rg_tool.py --target '$TARGET' build ${APPS[*]}"

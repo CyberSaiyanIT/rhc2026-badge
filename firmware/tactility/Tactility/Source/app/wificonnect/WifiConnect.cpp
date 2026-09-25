@@ -38,6 +38,7 @@ struct Context {
 
     bool connecting = false;
     bool connectionError = false;
+    WifiStationConnectionError connectionErrorType = WIFI_STATION_CONNECTION_ERROR_NONE;
 
     lv_obj_t* ssid_textarea = nullptr;
     lv_obj_t* ssid_error = nullptr;
@@ -77,6 +78,7 @@ void onWifiEvent(Context* ctx, WifiEvent event) {
             if (ctx->connecting) {
                 ctx->connecting = false;
                 ctx->connectionError = true;
+                ctx->connectionErrorType = event.connection_error;
                 updateView(ctx);
             }
         }
@@ -111,6 +113,14 @@ void setLoading(Context* ctx, bool loading) {
     }
 }
 
+const char* connectionErrorText(WifiStationConnectionError error) {
+    switch (error) {
+        case WIFI_STATION_CONNECTION_ERROR_WRONG_CREDENTIALS: return "Wrong password";
+        case WIFI_STATION_CONNECTION_ERROR_TARGET_NOT_FOUND: return "Network not found";
+        default: return "Connection failed";
+    }
+}
+
 void updateView(Context* ctx) {
     if (ctx->connect_button == nullptr) {
         // Buried (e.g. this window's own connecting state closed it, or a future dialog opens on top)
@@ -119,7 +129,7 @@ void updateView(Context* ctx) {
     if (ctx->connectionError) {
         setLoading(ctx, false);
         resetErrors(ctx);
-        lv_label_set_text(ctx->connection_error, "Connection failed");
+        lv_label_set_text(ctx->connection_error, connectionErrorText(ctx->connectionErrorType));
         lv_obj_remove_flag(ctx->connection_error, LV_OBJ_FLAG_HIDDEN);
     }
 }
@@ -130,18 +140,19 @@ void onConnectPressed(lv_event_t* event) {
     ctx->connectionError = false;
     resetErrors(ctx);
 
-    const char* ssid = lv_textarea_get_text(ctx->ssid_textarea);
-    size_t ssid_len = strlen(ssid);
-    if (ssid_len > TT_WIFI_SSID_LIMIT) {
+    // Copied, not held as pointers: lv_textarea_get_text() hands back the widget's own buffer,
+    // and setLoading() below changes the widget's state, which rebuilds it.
+    const std::string ssid = lv_textarea_get_text(ctx->ssid_textarea);
+    const std::string password = lv_textarea_get_text(ctx->password_textarea);
+
+    if (ssid.size() > TT_WIFI_SSID_LIMIT) {
         LOG_E(TAG, "SSID too long");
         lv_label_set_text(ctx->ssid_error, "SSID too long");
         lv_obj_remove_flag(ctx->ssid_error, LV_OBJ_FLAG_HIDDEN);
         return;
     }
 
-    const char* password = lv_textarea_get_text(ctx->password_textarea);
-    size_t password_len = strlen(password);
-    if (password_len > TT_WIFI_CREDENTIALS_PASSWORD_LIMIT) {
+    if (password.size() > TT_WIFI_CREDENTIALS_PASSWORD_LIMIT) {
         LOG_E(TAG, "Password too long");
         lv_label_set_text(ctx->password_error, "Password too long");
         lv_obj_remove_flag(ctx->password_error, LV_OBJ_FLAG_HIDDEN);
@@ -271,7 +282,6 @@ void createWidgets(lv_obj_t* parent, void* userData) {
 
     ctx->password_textarea = lv_textarea_create(password_wrapper);
     lv_textarea_set_one_line(ctx->password_textarea, true);
-    lv_textarea_set_password_mode(ctx->password_textarea, true);
     lv_obj_align(ctx->password_textarea, LV_ALIGN_RIGHT_MID, 0, 0);
     lv_obj_set_width(ctx->password_textarea, LV_PCT(50));
 

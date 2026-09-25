@@ -252,6 +252,15 @@ bool setSpeakerEnabled(bool enabled);
 void claimMediaKeys(uint32_t appInstanceId);
 void releaseMediaKeys(uint32_t appInstanceId);
 
+/**
+ * Hands the claiming app every media key as it happens, press and release, instead of leaving it
+ * to LVGL. Runs on the LVGL task with the lock held, so it must not block.
+ *
+ * @return true to consume the key
+ */
+using MediaKeyHandlerFn = bool (*)(uint32_t key, bool pressed, void* context);
+void setMediaKeyHandler(uint32_t appInstanceId, MediaKeyHandlerFn handler, void* context);
+
 /** Applies the saved settings, or the built-in ones when nothing has been saved yet. */
 void loadSettings();
 /**

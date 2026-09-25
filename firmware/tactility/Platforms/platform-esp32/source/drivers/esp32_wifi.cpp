@@ -87,6 +87,27 @@ WifiAuthenticationType to_wifi_authentication_type(wifi_auth_mode_t mode) {
     }
 }
 
+/**
+ * Maps the AP's disconnect reason onto what the user can do about it. Everything that is not
+ * clearly a bad key or a missing network is reported as a timeout, since the remaining reasons are
+ * transient and retrying is the only useful answer to them.
+ */
+WifiStationConnectionError to_connection_error(uint8_t reason) {
+    switch (reason) {
+        case WIFI_REASON_AUTH_FAIL:
+        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:
+            return WIFI_STATION_CONNECTION_ERROR_WRONG_CREDENTIALS;
+        case WIFI_REASON_NO_AP_FOUND:
+        case WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY:
+        case WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD:
+        case WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD:
+            return WIFI_STATION_CONNECTION_ERROR_TARGET_NOT_FOUND;
+        default:
+            return WIFI_STATION_CONNECTION_ERROR_TIMEOUT;
+    }
+}
+
 void fire_event(Esp32WifiCtx* ctx, WifiEvent event) {
     mutex_lock(&ctx->subscriptionsMutex);
     for (WifiEventSubscription* sub = ctx->subscriptions; sub != nullptr; sub = sub->internal.next) {
@@ -122,6 +143,9 @@ void on_wifi_or_ip_event(void* arg, esp_event_base_t event_base, int32_t event_i
     }
 
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        const auto* disconnected = static_cast<wifi_event_sta_disconnected_t*>(event_data);
+        const uint8_t reason = disconnected != nullptr ? disconnected->reason : 0;
+
         mutex_lock(&ctx->mutex);
         bool was_pending = ctx->stationState == WIFI_STATION_STATE_CONNECTION_PENDING;
         ctx->stationState = WIFI_STATION_STATE_DISCONNECTED;
@@ -134,9 +158,10 @@ void on_wifi_or_ip_event(void* arg, esp_event_base_t event_base, int32_t event_i
         fire_event(ctx, state_event);
 
         if (was_pending) {
+            LOG_W(TAG, "Connection failed, reason %u", (unsigned)reason);
             WifiEvent result_event = {};
             result_event.type = WIFI_EVENT_TYPE_STATION_CONNECTION_RESULT;
-            result_event.connection_error = WIFI_STATION_CONNECTION_ERROR_TARGET_NOT_FOUND;
+            result_event.connection_error = to_connection_error(reason);
             fire_event(ctx, result_event);
             NetworkDisconnectedEvent disconnected_event = {
                 .device = ctx->device
@@ -446,6 +471,12 @@ error_t api_station_connect(Device* device, const char* ssid, const char* passwo
         strncpy(reinterpret_cast<char*>(config.sta.password), password, sizeof(config.sta.password) - 1);
         config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
     }
+
+    // Lengths rather than the values: enough to tell a mangled or empty field from a rejected one,
+    // without putting the key in the log.
+    LOG_I(TAG, "Connecting to '%s' (ssid %u, password %u, channel %d)", config.sta.ssid,
+        (unsigned)strlen(reinterpret_cast<const char*>(config.sta.ssid)),
+        (unsigned)strlen(reinterpret_cast<const char*>(config.sta.password)), (int)channel);
 
     esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &config);
     if (err != ESP_OK) {

@@ -36,7 +36,7 @@ struct Settings {
     uint8_t activeBrightness = 40;
     uint8_t activeSpeed = 5;
 
-    Animation standbyAnimation = Animation::Breathing;
+    Animation standbyAnimation = Animation::Rainbow;
     uint8_t standbyR = 255, standbyG = 255, standbyB = 255;
     ColorMode standbyColorMode = ColorMode::Static;
     // Dim and slow: this is what the badge does on a table, not what it does in a hand.
