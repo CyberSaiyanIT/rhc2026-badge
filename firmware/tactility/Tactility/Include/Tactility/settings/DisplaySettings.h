@@ -19,6 +19,7 @@ enum class ScreensaverType {
     MatrixRain,
     StackChan,
     RomHackLogo,
+    CassetteTape,
     Count           // Sentinel for bounds checking - must be last
 };
 
@@ -42,7 +43,7 @@ struct DisplaySettings {
     uint8_t backlightDuty;
     bool backlightTimeoutEnabled;
     uint32_t backlightTimeoutMs; // 0 = Never
-    ScreensaverType screensaverType = ScreensaverType::RomHackLogo;
+    ScreensaverType screensaverType = ScreensaverType::CassetteTape;
     ThemeType theme = ThemeType::RomHack;
 };
 

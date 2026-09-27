@@ -90,6 +90,8 @@ static std::string toString(ScreensaverType type) {
             return "StackChan";
         case RomHackLogo:
             return "RomHackLogo";
+        case CassetteTape:
+            return "CassetteTape";
         default:
             std::unreachable();
     }
@@ -113,6 +115,9 @@ static bool fromString(const std::string& str, ScreensaverType& type) {
         return true;
     } else if (str == "RomHackLogo") {
         type = ScreensaverType::RomHackLogo;
+        return true;
+    } else if (str == "CassetteTape") {
+        type = ScreensaverType::CassetteTape;
         return true;
     } else {
         return false;
@@ -248,7 +253,7 @@ DisplaySettings getDefault() {
         .backlightDuty = 200,
         .backlightTimeoutEnabled = true,
         .backlightTimeoutMs = 15000,
-        .screensaverType = ScreensaverType::RomHackLogo,
+        .screensaverType = ScreensaverType::CassetteTape,
         .theme = ThemeType::RomHack
     };
 }

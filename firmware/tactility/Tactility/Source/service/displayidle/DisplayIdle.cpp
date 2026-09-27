@@ -12,6 +12,7 @@
 #include <cstring>
 
 #include "BouncingBallsScreensaver.h"
+#include "CassetteTapeScreensaver.h"
 #include "MatrixRainScreensaver.h"
 #include "MystifyScreensaver.h"
 #include "NowPlayingScreensaver.h"
@@ -240,6 +241,9 @@ void DisplayIdleService::activateScreensaver() {
             break;
         case settings::display::ScreensaverType::RomHackLogo:
             screensaver = std::make_unique<RomHackLogoScreensaver>();
+            break;
+        case settings::display::ScreensaverType::CassetteTape:
+            screensaver = std::make_unique<CassetteTapeScreensaver>();
             break;
         case settings::display::ScreensaverType::None:
         default:

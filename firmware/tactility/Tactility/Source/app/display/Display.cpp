@@ -334,7 +334,7 @@ void createWidgets(lv_obj_t* parent, void* userData) {
 
         ctx->screensaverDropdown = lv_dropdown_create(screensaver_wrapper);
         // Note: order correlates with settings::display::ScreensaverType enum order
-        lv_dropdown_set_options(ctx->screensaverDropdown, "None\nBouncing Balls\nMystify\nMatrix Rain\nStackChan\nRomHack Logo");
+        lv_dropdown_set_options(ctx->screensaverDropdown, "None\nBouncing Balls\nMystify\nMatrix Rain\nStackChan\nRomHack Logo\nCassette Tape");
         lv_obj_align(ctx->screensaverDropdown, LV_ALIGN_RIGHT_MID, 0, 0);
         lv_obj_add_event_cb(ctx->screensaverDropdown, onScreensaverChanged, LV_EVENT_VALUE_CHANGED, ctx);
         lv_dropdown_set_selected(ctx->screensaverDropdown, static_cast<uint16_t>(ctx->displaySettings.screensaverType));
