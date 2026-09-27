@@ -158,9 +158,8 @@ static uint32_t scan_key(RomhackKeypadInternal* internal, uint32_t* out_physical
     if (pressed0 & P0_DOWN) return (use_dir || vertical_keys) ? LV_KEY_DOWN : LV_KEY_NEXT;
     if (pressed0 & P0_LEFT) return (use_dir || horizontal_keys) ? LV_KEY_LEFT : LV_KEY_PREV;
     if (pressed0 & P0_RIGHT) return (use_dir || horizontal_keys) ? LV_KEY_RIGHT : LV_KEY_NEXT;
-    if (pressed1 & P1_A1) return LV_KEY_ENTER;
-    
-    if (pressed0 & P0_B) {
+    if (pressed0 & P0_B) return LV_KEY_ENTER;
+    if (pressed1 & P1_A1) {
         if (!editing && !dropdown_open) {
             return 0x10000; // Special internal code for "Toolbar Back"
         }
