@@ -1,3 +1,4 @@
+#include <Tactility/lvgl/Theme.h>
 #include <Tactility/service/audio/Audio.h>
 #include <Tactility/service/music/Music.h>
 
@@ -288,11 +289,11 @@ std::string volumeText() {
     return std::format("{} {}", LV_SYMBOL_VOLUME_MAX, shown);
 }
 
-constexpr lv_color_t accent() { return lv_color_hex(0x4F8CFF); }
+lv_color_t accent() { return lvgl::getThemeAccent(); }
 // Deliberately not accent(): the picker's focus ring and its playing row must not read as one.
 constexpr lv_color_t playing() { return lv_color_hex(0x22C55E); }
-constexpr lv_color_t surface() { return lv_color_hex(0x1B1D23); }
-constexpr lv_color_t surfaceRaised() { return lv_color_hex(0x272A33); }
+lv_color_t surface() { return lvgl::getThemeSurface(); }
+lv_color_t surfaceRaised() { return lvgl::getThemeSurfaceRaised(); }
 
 // Bubbling has to be set on every level: LVGL passes an event to a parent only if the child that
 // received it carries the flag, so a container without it swallows the media keys on their way up.
@@ -441,7 +442,7 @@ void refresh(lv_timer_t* timer) {
             clip).c_str());
     }
     lv_obj_set_style_text_color(ctx->statusLabel,
-        telemetry.clipping ? lv_color_hex(0xEF4444) : lv_color_white(), LV_PART_MAIN);
+        telemetry.clipping ? lv_color_hex(0xEF4444) : lvgl::getThemeText(), LV_PART_MAIN);
 
     lv_bar_set_value(ctx->bufferBar, telemetry.bufferPercent, LV_ANIM_OFF);
 
@@ -504,7 +505,7 @@ void styleFocusRing(lv_obj_t* object) {
     lv_obj_set_style_outline_width(object, 0, LV_STATE_FOCUSED);
     lv_obj_set_style_outline_width(object, 0, LV_STATE_FOCUS_KEY);
     lv_obj_set_style_border_width(object, 2, LV_STATE_FOCUSED);
-    lv_obj_set_style_border_color(object, lv_color_white(), LV_STATE_FOCUSED);
+    lv_obj_set_style_border_color(object, lvgl::getThemeText(), LV_STATE_FOCUSED);
     lv_obj_set_style_border_opa(object, LV_OPA_90, LV_STATE_FOCUSED);
 }
 
@@ -512,7 +513,9 @@ lv_obj_t* createChip(lv_obj_t* parent, const char* symbol, lv_event_cb_t callbac
     auto* chip = lv_button_create(parent);
     lv_obj_set_size(chip, 40, 34);
     lv_obj_set_style_radius(chip, 17, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(chip, active ? accent() : surfaceRaised(), LV_PART_MAIN);
+    const lv_color_t fill = active ? accent() : surfaceRaised();
+    lv_obj_set_style_bg_color(chip, fill, LV_PART_MAIN);
+    lv_obj_set_style_text_color(chip, lvgl::getContrastingText(fill), LV_PART_MAIN);
     lv_obj_set_style_shadow_width(chip, 0, LV_PART_MAIN);
     lv_obj_set_style_border_width(chip, 0, LV_PART_MAIN);
 
@@ -530,7 +533,9 @@ lv_obj_t* createChip(lv_obj_t* parent, const char* symbol, lv_event_cb_t callbac
 }
 
 void setChipActive(lv_obj_t* chip, bool active) {
-    lv_obj_set_style_bg_color(chip, active ? accent() : surfaceRaised(), LV_PART_MAIN);
+    const lv_color_t fill = active ? accent() : surfaceRaised();
+    lv_obj_set_style_bg_color(chip, fill, LV_PART_MAIN);
+    lv_obj_set_style_text_color(chip, lvgl::getContrastingText(fill), LV_PART_MAIN);
     lv_obj_set_style_text_opa(lv_obj_get_child(chip, 0), active ? LV_OPA_COVER : LV_OPA_70, LV_PART_MAIN);
 }
 
@@ -816,6 +821,7 @@ lv_obj_t* createWideButton(lv_obj_t* parent, Context* ctx, const char* text, lv_
     lv_obj_set_width(back, LV_PCT(100));
     lv_obj_set_style_radius(back, 8, LV_PART_MAIN);
     lv_obj_set_style_bg_color(back, surfaceRaised(), LV_PART_MAIN);
+    lv_obj_set_style_text_color(back, lvgl::getContrastingText(surfaceRaised()), LV_PART_MAIN);
     styleFocusRing(back);
     auto* back_label = lv_label_create(back);
     lv_label_set_text(back_label, text);
@@ -891,7 +897,7 @@ void buildPlayerPage(Context* ctx, lv_obj_t* parent) {
 
     // Buffer fill is shown continuously: it is the thing that explains a stutter.
     ctx->bufferBar = lv_bar_create(parent);
-    styleProgressBar(ctx->bufferBar, 3, lv_color_hex(0x5A6070), LV_OPA_30);
+    styleProgressBar(ctx->bufferBar, 3, lvgl::getThemeGrey(), LV_OPA_30);
 
     // Transport has no on-screen buttons: play/pause, previous and next are physical keys. Only
     // what has no key of its own stays on screen.
@@ -914,8 +920,10 @@ void buildPlayerPage(Context* ctx, lv_obj_t* parent) {
 }
 
 void styleTrackRow(lv_obj_t* row, bool isPlaying) {
-    lv_obj_set_style_bg_color(row, isPlaying ? playing() : surfaceRaised(), LV_PART_MAIN);
+    const lv_color_t fill = isPlaying ? playing() : surfaceRaised();
+    lv_obj_set_style_bg_color(row, fill, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(row, isPlaying ? LV_OPA_COVER : LV_OPA_40, LV_PART_MAIN);
+    lv_obj_set_style_text_color(row, lvgl::getContrastingText(fill), LV_PART_MAIN);
     // lv_list_add_button() puts the icon in child 0 as an image whose source is the symbol text.
     lv_image_set_src(lv_obj_get_child(row, 0), isPlaying ? LV_SYMBOL_PLAY : LV_SYMBOL_AUDIO);
 }
@@ -986,7 +994,7 @@ void styleLibraryRow(lv_obj_t* row, const music::LibraryEntry& entry, bool queue
     const bool emphasised = queued && !entry.isFolder;
     lv_obj_set_style_bg_color(row, surfaceRaised(), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(row, emphasised ? LV_OPA_COVER : LV_OPA_30, LV_PART_MAIN);
-    lv_obj_set_style_text_color(row, emphasised ? lv_color_white() : lv_color_hex(0xB8BDC9), LV_PART_MAIN);
+    lv_obj_set_style_text_color(row, lvgl::getContrastingText(surfaceRaised()), LV_PART_MAIN);
     lv_obj_set_style_text_opa(row, emphasised ? LV_OPA_COVER : LV_OPA_70, LV_PART_MAIN);
 
     const char* icon = entry.isFolder ? LV_SYMBOL_DIRECTORY : (queued ? LV_SYMBOL_OK : LV_SYMBOL_AUDIO);
@@ -1209,7 +1217,7 @@ lv_obj_t* createSliderRow(lv_obj_t* parent, const char* name, int32_t nameWidth,
     lv_obj_set_style_outline_width(slider, 0, LV_PART_KNOB | LV_STATE_FOCUSED);
     // The knob grows when focused, which reads clearly without painting outside the row.
     lv_obj_set_style_pad_all(slider, 4, LV_PART_KNOB | LV_STATE_FOCUSED);
-    lv_obj_set_style_bg_color(slider, lv_color_white(), LV_PART_KNOB | LV_STATE_FOCUSED);
+    lv_obj_set_style_bg_color(slider, lvgl::getThemeText(), LV_PART_KNOB | LV_STATE_FOCUSED);
     lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLL_WITH_ARROW);
     addBubbling(slider);
 
@@ -1240,6 +1248,7 @@ lv_obj_t* createActionRow(lv_obj_t* parent, const char* name, const char* value,
     lv_obj_set_height(button, LV_SIZE_CONTENT);
     lv_obj_set_style_radius(button, 8, LV_PART_MAIN);
     lv_obj_set_style_bg_color(button, surfaceRaised(), LV_PART_MAIN);
+    lv_obj_set_style_text_color(button, lvgl::getContrastingText(surfaceRaised()), LV_PART_MAIN);
     lv_obj_set_style_shadow_width(button, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(button, 8, LV_PART_MAIN);
     lv_obj_set_flex_flow(button, LV_FLEX_FLOW_ROW);

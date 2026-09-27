@@ -1,4 +1,5 @@
 #include <Tactility/app/map/MapAppPrivate.h>
+#include <Tactility/lvgl/Theme.h>
 #include <Tactility/network/Http.h>
 #include <Tactility/service/music/Music.h>
 #include <Tactility/service/wifi/Wifi.h>
@@ -500,6 +501,9 @@ void createWidgets(lv_obj_t* parent, void* userData) {
     lv_obj_align(ctx->statusLabel, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_obj_set_style_bg_color(ctx->statusLabel, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(ctx->statusLabel, LV_OPA_70, LV_PART_MAIN);
+    // The pill is a dark scrim over the map, not a themed surface, so its ink follows the scrim
+    // rather than the theme: a light theme's dark text would be invisible on it.
+    lv_obj_set_style_text_color(ctx->statusLabel, lvgl::getContrastingText(lv_color_black()), LV_PART_MAIN);
     lv_obj_set_style_pad_all(ctx->statusLabel, 4, LV_PART_MAIN);
     renderStatus(ctx);
 

@@ -1,3 +1,4 @@
+#include <Tactility/lvgl/Theme.h>
 #include <Tactility/service/neopixel/NeoPixel.h>
 
 #include <app/event.h>
@@ -110,9 +111,9 @@ struct Context {
     lv_timer_t* animationSyncTimer = nullptr;
 };
 
-constexpr lv_color_t accent() { return lv_color_hex(0x4F8CFF); }
-constexpr lv_color_t surface() { return lv_color_hex(0x1B1D23); }
-constexpr lv_color_t surfaceRaised() { return lv_color_hex(0x272A33); }
+lv_color_t accent() { return lvgl::getThemeAccent(); }
+lv_color_t surface() { return lvgl::getThemeSurface(); }
+lv_color_t surfaceRaised() { return lvgl::getThemeSurfaceRaised(); }
 
 void populate(lv_obj_t* root, void* userData);
 void showPage(Context* ctx, Page page);
@@ -124,7 +125,7 @@ void styleFocusRing(lv_obj_t* object) {
     lv_obj_set_style_outline_width(object, 0, LV_STATE_FOCUSED);
     lv_obj_set_style_outline_width(object, 0, LV_STATE_FOCUS_KEY);
     lv_obj_set_style_border_width(object, 2, LV_STATE_FOCUSED);
-    lv_obj_set_style_border_color(object, lv_color_white(), LV_STATE_FOCUSED);
+    lv_obj_set_style_border_color(object, lvgl::getThemeText(), LV_STATE_FOCUSED);
     lv_obj_set_style_border_opa(object, LV_OPA_90, LV_STATE_FOCUSED);
 }
 
@@ -155,6 +156,7 @@ lv_obj_t* createButtonRow(lv_obj_t* parent, const char* text) {
     lv_obj_set_size(button, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_style_radius(button, 8, LV_PART_MAIN);
     lv_obj_set_style_bg_color(button, surfaceRaised(), LV_PART_MAIN);
+    lv_obj_set_style_text_color(button, lvgl::getContrastingText(surfaceRaised()), LV_PART_MAIN);
     lv_obj_set_style_pad_all(button, 8, LV_PART_MAIN);
     lv_obj_set_flex_flow(button, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(button, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -190,7 +192,7 @@ lv_obj_t* createSlider(lv_obj_t* parent, const char* name, int min, int max, int
     lv_obj_set_style_outline_width(slider, 0, LV_PART_KNOB | LV_STATE_FOCUSED);
     // The knob grows on focus, which reads clearly without painting outside the row.
     lv_obj_set_style_pad_all(slider, 4, LV_PART_KNOB | LV_STATE_FOCUSED);
-    lv_obj_set_style_bg_color(slider, lv_color_white(), LV_PART_KNOB | LV_STATE_FOCUSED);
+    lv_obj_set_style_bg_color(slider, lvgl::getThemeText(), LV_PART_KNOB | LV_STATE_FOCUSED);
     lv_obj_add_event_cb(slider, onSliderChanged, LV_EVENT_VALUE_CHANGED, nullptr);
     lv_obj_add_event_cb(slider, callback, LV_EVENT_VALUE_CHANGED, ctx);
     return slider;
