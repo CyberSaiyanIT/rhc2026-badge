@@ -165,10 +165,12 @@ lv_obj_t* lvgl_sliderbox_create(lv_obj_t* parent, int32_t min, int32_t max, int3
     // +4 padding wasn't enough margin for 3-digit values to never wrap; widened to
     // a flat per-character estimate instead of trusting raw glyph width too tightly.
     char buffer[16];
+    lv_text_attributes_t attributes {};
+    lv_text_attributes_init(&attributes);
     lv_snprintf(buffer, sizeof(buffer), "%" LV_PRId32, min);
-    auto width_min = lv_text_get_width(buffer, lv_strlen(buffer), lv_obj_get_style_text_font(sliderBox->valueLabel, LV_PART_MAIN), 0);
+    auto width_min = lv_text_get_width(buffer, lv_strlen(buffer), lv_obj_get_style_text_font(sliderBox->valueLabel, LV_PART_MAIN), &attributes);
     lv_snprintf(buffer, sizeof(buffer), "%" LV_PRId32, max);
-    auto width_max = lv_text_get_width(buffer, lv_strlen(buffer), lv_obj_get_style_text_font(sliderBox->valueLabel, LV_PART_MAIN), 0);
+    auto width_max = lv_text_get_width(buffer, lv_strlen(buffer), lv_obj_get_style_text_font(sliderBox->valueLabel, LV_PART_MAIN), &attributes);
     auto max_width = (width_min > width_max) ? width_min : width_max;
     lv_obj_set_width(sliderBox->valueLabel, max_width + 8);
 
