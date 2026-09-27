@@ -11,6 +11,7 @@
 #include <lvgl_window_manager/window_manager.h>
 #include <lvgl/lvgl.h>
 #include <lvgl.h>
+#include <src/misc/cache/instance/lv_image_cache.h>
 #include <tactility/log.h>
 
 #include <miniz.h>
