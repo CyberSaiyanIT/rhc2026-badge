@@ -19,11 +19,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          docker system prune --all --force
+
       - name: Initialize submodules
         run: firmware/tactility/Buildscripts/init-submodules.sh
 
       - name: Build firmware
         run: firmware/build_all.sh
+        env:
+          CONTAINER_ENGINE: docker
 
       - name: Prepare firmware
         run: mv firmware/fw.img firmware.bin
