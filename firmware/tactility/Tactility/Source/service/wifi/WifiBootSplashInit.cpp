@@ -38,8 +38,8 @@ struct ApProperties {
     bool autoRemovePropertiesFile;
 };
 
-constexpr auto* DEFAULT_AP_SSID = "test_ap";
-constexpr auto* DEFAULT_AP_PASSWORD = "123456789";
+constexpr auto* DEFAULT_AP_SSID = "romhackcamp-badge";
+constexpr auto* DEFAULT_AP_PASSWORD = "ilovethisbadge";
 
 static void seedDefaultWifiAp() {
     if (settings::contains(DEFAULT_AP_SSID)) {

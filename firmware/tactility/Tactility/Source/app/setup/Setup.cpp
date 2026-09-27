@@ -81,6 +81,7 @@ struct StepConfiguration {
     std::string title;
     std::string description;
     std::function<void()> run;
+    std::function<bool()> skip;
 };
 
 struct Context {
@@ -127,6 +128,10 @@ void renderCurrent(Context* ctx) {
 }
 
 void advanceTo(Context* ctx, size_t index) {
+    while (index < ctx->steps.size() && ctx->steps[index].skip && ctx->steps[index].skip()) {
+        index++;
+    }
+
     if (index < ctx->steps.size()) {
         ctx->stepIndex = index;
         ctx->phase = Phase::StepIntro;
@@ -222,7 +227,8 @@ int32_t appMain(int argc, char* argv[]) {
             .run = [&ctx] {
                 service::wifi::setEnabled(true);
                 ctx.pendingStepDialogId = wifimanage::start(ctx.appInstanceId);
-            }
+            },
+            .skip = [] { return service::wifi::getRadioState() == service::wifi::RadioState::ConnectionActive; }
         }
     };
 
