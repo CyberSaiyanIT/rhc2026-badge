@@ -2,6 +2,8 @@
 
 #include "CassetteTapeScreensaver.h"
 
+LV_IMAGE_DECLARE(cassette_image);
+
 namespace tt::service::displayidle {
 
 namespace {
@@ -9,8 +11,6 @@ namespace {
 constexpr std::array<int16_t, 12> COSINE = {1000, 866, 500, 0, -500, -866, -1000, -866, -500, 0, 500, 866};
 constexpr std::array<int16_t, 12> SINE = {0, 500, 866, 1000, 866, 500, 0, -500, -866, -1000, -866, -500};
 constexpr uint32_t PHASE_DURATION_MS = 60;
-constexpr lv_coord_t CASSETTE_WIDTH = 320;
-constexpr lv_coord_t CASSETTE_HEIGHT = 240;
 constexpr lv_coord_t REEL_SIZE = 32;
 constexpr lv_coord_t HUB_SIZE = 20;
 constexpr lv_coord_t SPOKE_RADIUS = 12;
@@ -25,9 +25,7 @@ void setPlainBox(lv_obj_t* object) {
 
 void CassetteTapeScreensaver::start(lv_obj_t* overlay, lv_coord_t, lv_coord_t) {
     cassette_ = lv_image_create(overlay);
-    lv_image_set_src(cassette_, CASSETTE_ASSET);
-    lv_obj_set_size(cassette_, CASSETTE_WIDTH, CASSETTE_HEIGHT);
-    lv_image_set_inner_align(cassette_, LV_IMAGE_ALIGN_STRETCH);
+    lv_image_set_src(cassette_, &cassette_image);
     lv_obj_center(cassette_);
 
     for (size_t reelIndex = 0; reelIndex < REEL_COUNT; reelIndex++) {

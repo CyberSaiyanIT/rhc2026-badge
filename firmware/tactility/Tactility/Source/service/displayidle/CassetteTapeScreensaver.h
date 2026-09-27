@@ -22,7 +22,6 @@ public:
     void update(lv_coord_t screenW, lv_coord_t screenH) override;
 
 private:
-    static constexpr auto* CASSETTE_ASSET = "A:/system/cassette.png";
     static constexpr size_t REEL_COUNT = 2;
     static constexpr size_t SPOKE_COUNT = 3;
 
