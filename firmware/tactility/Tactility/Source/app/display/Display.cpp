@@ -23,6 +23,9 @@
 
 #include <lvgl.h>
 
+#include <algorithm>
+#include <cmath>
+
 #ifdef ESP_PLATFORM
 #include <sdkconfig.h>
 #endif
@@ -34,6 +37,40 @@ extern const ::AppManifest manifest;
 constexpr auto* TAG = "Display";
 
 namespace {
+
+/**
+ * The slider moves in whole steps, spaced by perceived brightness rather than by duty cycle.
+ *
+ * Duty is linear in luminance and perception is close to its cube root, so a linear ramp puts
+ * nearly half of the visible range into the first tenth of the travel and almost nothing into the
+ * last half. Ten steps is also as fine as this is worth taking: the backlight level is a byte, so
+ * finer steps quantise into each other at the dim end where the curve is steepest.
+ */
+constexpr int BRIGHTNESS_STEPS = 10;
+constexpr float BRIGHTNESS_GAMMA = 2.2f;
+/** The slider stops here rather than at off: a dark screen has no on-screen way back. */
+constexpr int BRIGHTNESS_MIN_STEP = 1;
+
+uint8_t brightnessForStep(int step, uint8_t min, uint8_t max) {
+    if (step <= 0 || max <= min) {
+        return min;
+    }
+    if (step >= BRIGHTNESS_STEPS) {
+        return max;
+    }
+    const float fraction = powf((float) step / (float) BRIGHTNESS_STEPS, BRIGHTNESS_GAMMA);
+    const uint8_t level = (uint8_t) lroundf((float) min + fraction * (float) (max - min));
+    // A step above zero must still light the panel, however coarse the device's range is.
+    return level > min ? level : (uint8_t) (min + 1);
+}
+
+int stepForBrightness(uint8_t brightness, uint8_t min, uint8_t max) {
+    if (brightness <= min || max <= min) {
+        return 0;
+    }
+    const float fraction = (float) (brightness - min) / (float) (max - min);
+    return (int) lroundf(powf(fraction, 1.0f / BRIGHTNESS_GAMMA) * (float) BRIGHTNESS_STEPS);
+}
 
 struct Context {
     uint32_t appInstanceId;
@@ -73,7 +110,8 @@ void onBacklightSliderEvent(lv_event_t* event) {
     assert(backlight != nullptr);
 
     int32_t slider_value = lv_slider_get_value(slider);
-    ctx->displaySettings.backlightDuty = static_cast<uint8_t>(slider_value);
+    ctx->displaySettings.backlightDuty = brightnessForStep(
+        (int) slider_value, backlight_get_min_brightness(backlight), backlight_get_max_brightness(backlight));
     ctx->displaySettingsUpdated = true;
     backlight_set_brightness(backlight, ctx->displaySettings.backlightDuty);
     device_put(backlight);
@@ -200,10 +238,12 @@ void createWidgets(lv_obj_t* parent, void* userData) {
             auto* brightness_slider = lv_slider_create(brightness_wrapper);
             lv_obj_set_width(brightness_slider, LV_PCT(50));
             lv_obj_align(brightness_slider, LV_ALIGN_RIGHT_MID, 0, 0);
-            lv_slider_set_range(brightness_slider, backlight_get_min_brightness(backlight), backlight_get_max_brightness(backlight));
+            lv_slider_set_range(brightness_slider, BRIGHTNESS_MIN_STEP, BRIGHTNESS_STEPS);
             lv_obj_add_event_cb(brightness_slider, onBacklightSliderEvent, LV_EVENT_VALUE_CHANGED, ctx);
 
-            lv_slider_set_value(brightness_slider, ctx->displaySettings.backlightDuty, LV_ANIM_OFF);
+            const int current_step = stepForBrightness(ctx->displaySettings.backlightDuty,
+                backlight_get_min_brightness(backlight), backlight_get_max_brightness(backlight));
+            lv_slider_set_value(brightness_slider, std::max(current_step, BRIGHTNESS_MIN_STEP), LV_ANIM_OFF);
         }
         // Only compared against nullptr below, never dereferenced again, so releasing it here is safe.
         device_put(backlight);
