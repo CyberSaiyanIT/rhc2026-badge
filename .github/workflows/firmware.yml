@@ -1,0 +1,64 @@
+name: Build firmware
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize submodules
+        run: firmware/tactility/Buildscripts/init-submodules.sh
+
+      - name: Build firmware
+        run: firmware/build_all.sh
+
+      - name: Prepare firmware
+        run: mv firmware/fw.img firmware.bin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: firmware.bin
+
+      - name: Check out website
+        if: github.event_name == 'release'
+        uses: actions/checkout@v4
+        with:
+          repository: CyberSaiyanIT/rhc2026-badge.github.io
+          token: ${{ secrets.PAGES_REPO_TOKEN }}
+          path: website
+
+      - name: Update website firmware
+        if: github.event_name == 'release'
+        run: |
+          mkdir -p website/public/firmware
+          cp firmware.bin website/public/firmware/firmware.bin
+          jq --arg version "${{ github.event.release.tag_name }}" \
+            '.version = $version' website/public/firmware/manifest.json > manifest.json
+          mv manifest.json website/public/firmware/manifest.json
+
+      - name: Create website pull request
+        if: github.event_name == 'release'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.PAGES_REPO_TOKEN }}
+          path: website
+          base: main
+          branch: firmware/${{ github.event.release.tag_name }}
+          delete-branch: true
+          commit-message: Update firmware for ${{ github.event.release.tag_name }}
+          title: Update firmware for ${{ github.event.release.tag_name }}
+          body: Automated firmware update for release ${{ github.event.release.tag_name }}.

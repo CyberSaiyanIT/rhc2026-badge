@@ -82,7 +82,8 @@ fi
 
 echo "==> Tactility"
 # lark is the devicetree compiler's parser and is not declared anywhere ESP-IDF would install it.
-run_in "$TACTILITY" /project "python -c 'import lark' 2>/dev/null || pip install -q lark; \
+run_in "$TACTILITY" /project "python -c 'import lark' 2>/dev/null || pip install -q --target /tmp/rhc-python lark; \
+  export PYTHONPATH=/tmp/rhc-python:\${PYTHONPATH:-}; \
   python device.py '$TARGET' && idf.py build"
 
 echo "==> Retro-Go (${APPS[*]})"
