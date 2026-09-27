@@ -33,20 +33,20 @@ struct Settings {
     // White, so a pattern that paints the stage colour reads as neutral until one is picked.
     uint8_t activeR = 255, activeG = 255, activeB = 255;
     ColorMode activeColorMode = ColorMode::Static;
-    uint8_t activeBrightness = 40;
+    uint8_t activeBrightness = 2;
     uint8_t activeSpeed = 5;
 
     Animation standbyAnimation = Animation::Rainbow;
     uint8_t standbyR = 255, standbyG = 255, standbyB = 255;
     ColorMode standbyColorMode = ColorMode::Static;
     // Dim and slow: this is what the badge does on a table, not what it does in a hand.
-    uint8_t standbyBrightness = 40;
+    uint8_t standbyBrightness = 2;
     uint8_t standbySpeed = 2;
 
     SleepAnimation sleepAnimation = SleepAnimation::Beacon;
     uint8_t sleepR = 255, sleepG = 255, sleepB = 255;
     ColorMode sleepColorMode = ColorMode::Static;
-    uint8_t sleepBrightness = 40;
+    uint8_t sleepBrightness = 2;
     uint8_t sleepIntervalSeconds = 3;
     uint8_t sleepMinutes = 5;
 
@@ -57,7 +57,7 @@ struct Settings {
 
     VuOrigin vuOrigin = VuOrigin::Center;
     VuPalette vuPalette = VuPalette::Classic;
-    uint8_t vuBrightness = 40;
+    uint8_t vuBrightness = 5;
     uint8_t sleepSpeed = 5;
     uint8_t vuSpeed = 5;
     uint16_t vuInactiveSeconds = 1800;
