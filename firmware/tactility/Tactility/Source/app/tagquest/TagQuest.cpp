@@ -46,11 +46,11 @@ constexpr auto* API_URL = "https://romhack.io/badge-quiz.php";
 constexpr int POLL_INTERVAL_MS = 100;
 constexpr int SCAN_INTERVAL_MS = 200;
 constexpr int WIFI_CONNECT_TIMEOUT_MS = 20000;
-constexpr int ANSWER_TIME_MS = 30000;
+constexpr int ANSWER_TIME_MS = 15000;
 constexpr int SUBMIT_GRACE_MS = 10000;
 constexpr int RESULT_DISPLAY_MS = 4000;
 /** How long "out of time" stays up, counting down, before the badge goes back to scanning. */
-constexpr int TIMEOUT_CLOSING_MS = 10000;
+constexpr int TIMEOUT_CLOSING_MS = 5000;
 
 constexpr size_t ANSWER_COUNT = 4;
 
