@@ -10,6 +10,8 @@
 
 #include <lvgl_window_manager/window_manager.h>
 
+#include <lvgl/devices/keyboard.h>
+
 #include <tactility/check.h>
 #include <tactility/device.h>
 #include <tactility/log.h>
@@ -53,10 +55,14 @@ constexpr int TIMEOUT_CLOSING_MS = 10000;
 constexpr size_t ANSWER_COUNT = 4;
 
 constexpr uint32_t COLOR_BACKGROUND = 0x000000;
-constexpr uint32_t COLOR_ACCENT = 0x2CE8A0;
+constexpr uint32_t COLOR_ACCENT = 0xE80B60;
 constexpr uint32_t COLOR_DIM = 0x53707E;
 /** For the closing seconds and a wrong answer - the only two things worth pulling the eye. */
 constexpr uint32_t COLOR_ALERT = 0xE8542C;
+
+constexpr auto* QUEST_LOGO_ASSET = "A:/system/flame_question_icon.png";
+constexpr lv_coord_t QUEST_LOGO_WIDTH = 96;
+constexpr lv_coord_t QUEST_LOGO_HEIGHT = 96;
 
 /** Seconds left at which the countdown starts reading as a warning. */
 constexpr int COUNTDOWN_ALERT_MS = 10000;
@@ -401,6 +407,25 @@ void onBodyDeleted(lv_event_t* event) {
     ctx->usernameInput = nullptr;
 }
 
+void detachUsernameKeyboard(lv_obj_t* textarea) {
+    auto* keyboard = lvgl_software_keyboard_get_last();
+    if (keyboard == nullptr || keyboard->object == nullptr ||
+        lv_keyboard_get_textarea(keyboard->object) != textarea) {
+        return;
+    }
+
+    if (auto* group = lv_obj_get_group(textarea); group != nullptr) {
+        lv_group_set_editing(group, false);
+    }
+    lvgl_software_keyboard_hide(keyboard);
+    lv_group_remove_obj(keyboard->object);
+    lv_keyboard_set_textarea(keyboard->object, nullptr);
+}
+
+void onUsernameInputClosed(lv_event_t* event) {
+    detachUsernameKeyboard(lv_event_get_current_target_obj(event));
+}
+
 void onUsernameAccepted(lv_event_t* event) {
     auto* ctx = static_cast<Context*>(lv_event_get_user_data(event));
     if (ctx->usernameInput == nullptr) {
@@ -423,13 +448,42 @@ lv_obj_t* createMessageLabel(lv_obj_t* parent, const std::string& text, enum Lvg
     return label;
 }
 
+void renderScanning(Context* ctx) {
+    auto* mission = createMessageLabel(ctx->body, "YOUR NEXT MISSION", FONT_SIZE_LARGE);
+    lv_obj_set_style_text_align(mission, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_margin_bottom(mission, 4, 0);
+
+    auto* logoWrapper = lv_obj_create(ctx->body);
+    lv_obj_remove_style_all(logoWrapper);
+    lv_obj_set_size(logoWrapper, LV_PCT(100), QUEST_LOGO_HEIGHT);
+    lv_obj_set_flex_flow(logoWrapper, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(logoWrapper, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_margin_ver(logoWrapper, 6, 0);
+    lv_obj_remove_flag(logoWrapper, LV_OBJ_FLAG_SCROLLABLE);
+
+    auto* logo = lv_image_create(logoWrapper);
+    lv_image_set_src(logo, QUEST_LOGO_ASSET);
+    lv_obj_set_size(logo, QUEST_LOGO_WIDTH, QUEST_LOGO_HEIGHT);
+    lv_image_set_inner_align(logo, LV_IMAGE_ALIGN_STRETCH);
+
+    auto* headline = createMessageLabel(ctx->body, "FIND THIS LOGO\nAROUND THE CAMP", FONT_SIZE_DEFAULT);
+    lv_obj_set_style_text_align(headline, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_margin_top(headline, 4, 0);
+
+    auto* status = createMessageLabel(ctx->body, ctx->statusText, FONT_SIZE_SMALL, COLOR_DIM);
+    lv_obj_set_style_text_align(status, LV_TEXT_ALIGN_CENTER, 0);
+
+    auto* player = createMessageLabel(ctx->body, "PLAYER // " + ctx->settings.username, FONT_SIZE_SMALL, COLOR_ACCENT);
+    lv_obj_set_style_text_align(player, LV_TEXT_ALIGN_CENTER, 0);
+}
+
 /**
  * Kept to the top of the screen on purpose: the software keyboard covers the lower half of the
  * display, and a field placed any further down is hidden the moment it is focused.
  */
 void renderUsernameEntry(Context* ctx) {
-    createMessageLabel(ctx->body, "TAG QUEST", FONT_SIZE_LARGE);
-    createMessageLabel(ctx->body, "Choose a name", FONT_SIZE_SMALL, COLOR_DIM);
+    createMessageLabel(ctx->body, "Cyber Trivia", FONT_SIZE_LARGE);
+    createMessageLabel(ctx->body, "What's your name?", FONT_SIZE_SMALL, COLOR_DIM);
 
     ctx->usernameInput = lv_textarea_create(ctx->body);
     lv_textarea_set_one_line(ctx->usernameInput, true);
@@ -441,6 +495,8 @@ void renderUsernameEntry(Context* ctx) {
     }
     // lv_keyboard forwards its confirm key to the bound textarea as LV_EVENT_READY, so the
     // keyboard's own tick accepts the name as well as the OK button below.
+    lv_obj_add_event_cb(ctx->usernameInput, onUsernameInputClosed, LV_EVENT_READY, nullptr);
+    lv_obj_add_event_cb(ctx->usernameInput, onUsernameInputClosed, LV_EVENT_DELETE, nullptr);
     lv_obj_add_event_cb(ctx->usernameInput, onUsernameAccepted, LV_EVENT_READY, ctx);
     // Focused on arrival so the first key press opens the keyboard rather than walking the ring.
     lv_group_focus_obj(ctx->usernameInput);
@@ -448,6 +504,7 @@ void renderUsernameEntry(Context* ctx) {
     auto* button = lv_button_create(ctx->body);
     lv_obj_set_width(button, LV_PCT(100));
     lv_obj_set_style_margin_top(button, 4, 0);
+    lv_obj_add_event_cb(button, onUsernameInputClosed, LV_EVENT_SHORT_CLICKED, nullptr);
     lv_obj_add_event_cb(button, onUsernameAccepted, LV_EVENT_SHORT_CLICKED, ctx);
 
     auto* label = lv_label_create(button);
@@ -537,11 +594,7 @@ void renderBody(Context* ctx) {
             createMessageLabel(ctx->body, ctx->statusText, FONT_SIZE_LARGE);
             break;
         case State::Scanning:
-            createMessageLabel(ctx->body, "TAG QUEST", FONT_SIZE_LARGE);
-            // Labelled rather than bare: an unexplained word under the title reads as a leftover
-            // debug string, not as who you are playing as.
-            createMessageLabel(ctx->body, "Player: " + ctx->settings.username, FONT_SIZE_SMALL, COLOR_DIM);
-            createMessageLabel(ctx->body, ctx->statusText, FONT_SIZE_DEFAULT);
+            renderScanning(ctx);
             break;
         default:
             createMessageLabel(ctx->body, ctx->statusText, FONT_SIZE_DEFAULT);
@@ -628,6 +681,16 @@ void updateCountdown(Context* ctx, int remainingMs) {
     lvgl_unlock();
 }
 
+void updateTimeoutCountdown(Context* ctx, int remainingMs) {
+    lvgl_lock();
+    if (ctx->countdownLabel != nullptr) {
+        const int seconds = (remainingMs + 999) / 1000;
+        lv_label_set_text_fmt(ctx->countdownLabel, "LAST CHANCE %d", seconds);
+        lv_obj_set_style_text_color(ctx->countdownLabel, lv_color_hex(COLOR_ALERT), 0);
+    }
+    lvgl_unlock();
+}
+
 void setCountdownText(Context* ctx, const char* text, uint32_t color) {
     lvgl_lock();
     if (ctx->countdownLabel != nullptr) {
@@ -653,7 +716,7 @@ void enterScanning(Context* ctx) {
     enterState(ctx, State::Scanning);
 
     if (startReader(ctx)) {
-        setStatus(ctx, "Find tags hidden across the camp");
+        setStatus(ctx, "Scan the hidden tag when you find it");
     } else {
         setStatus(ctx, "Reader unavailable. Check the battery.");
     }
@@ -705,7 +768,7 @@ void pollScanning(const std::shared_ptr<Context>& ctx) {
         if (!startReader(ctx.get())) {
             return;
         }
-        setStatus(ctx.get(), "Find tags hidden across the camp");
+        setStatus(ctx.get(), "Scan the hidden tag when you find it");
     }
 
     std::string tagId;
@@ -793,7 +856,10 @@ void pollTimedOut(const std::shared_ptr<Context>& ctx) {
 
     if (ctx->stateElapsedMs >= TIMEOUT_CLOSING_MS) {
         enterResult(ctx.get(), "Out of time");
+        return;
     }
+
+    updateTimeoutCountdown(ctx.get(), TIMEOUT_CLOSING_MS - ctx->stateElapsedMs);
 }
 
 void pollSubmitting(const std::shared_ptr<Context>& ctx) {
@@ -832,7 +898,7 @@ int32_t appMain(int argc, char* argv[]) {
 
     const bool needsUsername = ctx->settings.username.empty();
     ctx->state = needsUsername ? State::NeedsUsername : State::Scanning;
-    ctx->statusText = needsUsername ? "" : "Find tags hidden across the camp";
+    ctx->statusText = needsUsername ? "" : "Scan the hidden tag when you find it";
 
     ctx->window = window_manager_create(appInstanceId, createWidgets, ctx.get());
 
@@ -915,7 +981,7 @@ int32_t appMain(int argc, char* argv[]) {
 
 extern const ::AppManifest manifest = {
     .id = "TagQuest",
-    .name = "Tag Quest",
+    .name = "Cyber Trivia",
     .category = APP_CATEGORY_USER,
     .location = { APP_LOCATION_MEMORY, reinterpret_cast<void*>(appMain) },
 };

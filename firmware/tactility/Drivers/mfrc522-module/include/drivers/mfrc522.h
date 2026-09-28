@@ -14,7 +14,8 @@ extern "C" {
 // len will be set to the length of the read UID.
 bool mfrc522_read_uid(struct Device* dev, uint8_t* uid_out, size_t* len);
 
-// Reads the first NDEF Text record from an NTAG or Ultralight tag.
+// Reads the first NDEF Text record from an NTAG, Ultralight, or NFC Forum-formatted
+// MIFARE Classic 1K tag using the standard MAD and NDEF application keys.
 // Returns true and writes NUL-terminated UTF-8 to out, which must be large enough for the text.
 // Returns false when no tag is present, the tag is not NDEF-formatted, or it holds no Text record.
 // out_tag_present, when given, distinguishes those: it is set true whenever a tag answered and was

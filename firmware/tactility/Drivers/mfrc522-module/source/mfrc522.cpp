@@ -28,6 +28,21 @@
 // quiz payload is a 36-character UUID and this runs on a timer task's stack.
 #define NDEF_READ_MAX_BYTES 256
 
+static constexpr uint8_t MIFARE_CLASSIC_1K_SAK = 0x08;
+static constexpr uint8_t MIFARE_CLASSIC_SECTOR_COUNT = 16;
+static constexpr uint8_t MIFARE_CLASSIC_BLOCKS_PER_SECTOR = 4;
+static constexpr uint8_t MIFARE_CLASSIC_DATA_BLOCKS_PER_SECTOR = 3;
+static constexpr uint8_t MIFARE_CLASSIC_KEY_SIZE = 6;
+static constexpr uint8_t MIFARE_MAD_KEY_A[MIFARE_CLASSIC_KEY_SIZE] = {
+    0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5
+};
+static constexpr uint8_t MIFARE_NDEF_KEY_A[MIFARE_CLASSIC_KEY_SIZE] = {
+    0xD3, 0xF7, 0xD3, 0xF7, 0xD3, 0xF7
+};
+static constexpr uint8_t MIFARE_TRANSPORT_KEY_A[MIFARE_CLASSIC_KEY_SIZE] = {
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+};
+
 #define GET_CONFIG(device) (static_cast<const NxpMfrc522Config*>((device)->config))
 
 struct Mfrc522Internal {
@@ -105,6 +120,7 @@ enum PICC_Command {
     PICC_CMD_SEL_CL2      = 0x95,
     PICC_CMD_SEL_CL3      = 0x97,
     PICC_CMD_HLTA         = 0x50,
+    PICC_CMD_MF_AUTH_KEY_A = 0x60,
     PICC_CMD_READ         = 0x30,
 };
 
@@ -364,11 +380,11 @@ static error_t picc_select(Mfrc522Internal* internal, uint8_t* uid_out, size_t* 
     return ERROR_RESOURCE;
 }
 
-/** Reads the 4 pages starting at @a page. Type 2 tags always answer 16 bytes. */
-static error_t picc_read_page(Mfrc522Internal* internal, uint8_t page, uint8_t* out) {
+/** Reads 16 bytes: four pages on Type 2 tags or one block on MIFARE Classic. */
+static error_t picc_read_16_bytes(Mfrc522Internal* internal, uint8_t address, uint8_t* out) {
     uint8_t buffer[4];
     buffer[0] = PICC_CMD_READ;
-    buffer[1] = page;
+    buffer[1] = address;
     if (pcd_calculate_crc(internal, buffer, 2, &buffer[2]) != ERROR_NONE) {
         return ERROR_TIMEOUT;
     }
@@ -382,6 +398,136 @@ static error_t picc_read_page(Mfrc522Internal* internal, uint8_t page, uint8_t* 
 
     memcpy(out, received, 16);
     return ERROR_NONE;
+}
+
+/** Authenticates one MIFARE Classic sector. Crypto1 stays active until explicitly stopped. */
+static error_t mifare_authenticate(
+    Mfrc522Internal* internal,
+    uint8_t block,
+    const uint8_t* key,
+    const uint8_t* uid,
+    size_t uid_len
+) {
+    if (uid_len < 4) {
+        return ERROR_INVALID_ARGUMENT;
+    }
+
+    uint8_t buffer[12];
+    buffer[0] = PICC_CMD_MF_AUTH_KEY_A;
+    buffer[1] = block;
+    memcpy(&buffer[2], key, MIFARE_CLASSIC_KEY_SIZE);
+    memcpy(&buffer[8], uid + uid_len - 4, 4);
+
+    error_t status = pcd_communicate(
+        internal,
+        PCD_MFAuthent,
+        buffer,
+        sizeof(buffer),
+        nullptr,
+        0,
+        nullptr,
+        nullptr
+    );
+    if (status != ERROR_NONE || (pcd_read_register(internal, Status2Reg) & 0x08) == 0) {
+        return ERROR_RESOURCE;
+    }
+    return ERROR_NONE;
+}
+
+static void mifare_stop_crypto1(Mfrc522Internal* internal) {
+    pcd_clear_register_bitmask(internal, Status2Reg, 0x08);
+}
+
+static error_t mifare_authenticate_for_read(
+    Mfrc522Internal* internal,
+    uint8_t block,
+    const uint8_t* standard_key,
+    const uint8_t* uid,
+    size_t uid_len
+) {
+    error_t status = mifare_authenticate(internal, block, standard_key, uid, uid_len);
+    if (status == ERROR_NONE) {
+        return ERROR_NONE;
+    }
+
+    // Some writer applications leave Classic sectors on the factory transport key even after
+    // creating a MAD and NDEF application. It is safe to accept that key for this read-only path.
+    mifare_stop_crypto1(internal);
+    return mifare_authenticate(internal, block, MIFARE_TRANSPORT_KEY_A, uid, uid_len);
+}
+
+/** Reads the NFC Forum NDEF application sectors described by MAD1 on a Classic 1K tag. */
+static bool mifare_classic_read_ndef_text(
+    Mfrc522Internal* internal,
+    const uint8_t* uid,
+    size_t uid_len,
+    char* out,
+    size_t out_size
+) {
+    if (mifare_authenticate_for_read(internal, 0, MIFARE_MAD_KEY_A, uid, uid_len) != ERROR_NONE) {
+        LOG_W(TAG, "MIFARE Classic: cannot authenticate MAD sector");
+        return false;
+    }
+
+    uint8_t trailer[16];
+    if (picc_read_16_bytes(internal, 3, trailer) != ERROR_NONE) {
+        LOG_W(TAG, "MIFARE Classic: cannot read MAD trailer");
+        return false;
+    }
+    if ((trailer[9] & 0x80) == 0 || (trailer[9] & 0x03) != 0x01) {
+        LOG_W(TAG, "MIFARE Classic: unsupported MAD GPB 0x%02X", trailer[9]);
+        return false;
+    }
+
+    uint8_t mad[32];
+    if (picc_read_16_bytes(internal, 1, mad) != ERROR_NONE ||
+        picc_read_16_bytes(internal, 2, mad + 16) != ERROR_NONE) {
+        LOG_W(TAG, "MIFARE Classic: cannot read MAD directory");
+        return false;
+    }
+
+    uint8_t data[NDEF_READ_MAX_BYTES];
+    size_t read_bytes = 0;
+    bool has_ndef_sector = false;
+    for (uint8_t sector = 1; sector < MIFARE_CLASSIC_SECTOR_COUNT; sector++) {
+        const size_t mad_offset = 2 + static_cast<size_t>(sector - 1) * 2;
+        if (mad[mad_offset] != 0x03 || mad[mad_offset + 1] != 0xE1) {
+            continue;
+        }
+        has_ndef_sector = true;
+
+        const uint8_t first_block = sector * MIFARE_CLASSIC_BLOCKS_PER_SECTOR;
+        if (mifare_authenticate_for_read(internal, first_block, MIFARE_NDEF_KEY_A, uid, uid_len) != ERROR_NONE) {
+            LOG_W(TAG, "MIFARE Classic: cannot authenticate NDEF sector %u", sector);
+            return false;
+        }
+
+        for (uint8_t block_offset = 0;
+             block_offset < MIFARE_CLASSIC_DATA_BLOCKS_PER_SECTOR && read_bytes < sizeof(data);
+             block_offset++) {
+            uint8_t block[16];
+            if (picc_read_16_bytes(internal, first_block + block_offset, block) != ERROR_NONE) {
+                LOG_W(TAG, "MIFARE Classic: cannot read block %u", first_block + block_offset);
+                return false;
+            }
+            size_t chunk = sizeof(data) - read_bytes;
+            if (chunk > sizeof(block)) {
+                chunk = sizeof(block);
+            }
+            memcpy(data + read_bytes, block, chunk);
+            read_bytes += chunk;
+        }
+    }
+
+    if (!has_ndef_sector) {
+        LOG_W(TAG, "MIFARE Classic: MAD has no NFC Forum application (AID E103)");
+        return false;
+    }
+    if (!ndef_parse_text_record(data, read_bytes, out, out_size)) {
+        LOG_W(TAG, "MIFARE Classic: NDEF application has no readable Text record");
+        return false;
+    }
+    return true;
 }
 
 /**
@@ -451,35 +597,39 @@ extern "C" bool mfrc522_read_ndef_text(struct Device* dev, char* out, size_t out
             // not read from no tag at all.
             if (out_tag_present) *out_tag_present = true;
 
-            // The capability container sits in page 3. Its first byte is the NDEF magic number;
-            // anything else means the tag was never formatted for NDEF and the data area holds
-            // no TLVs to walk.
-            uint8_t page_data[16];
-            if (picc_read_page(internal, 3, page_data) == ERROR_NONE && page_data[0] == 0xE1) {
-                // The usable data area is bounded by the CC's size byte, which counts 8-byte
-                // blocks. Capped so a corrupt CC cannot drive an unbounded read.
-                size_t available = static_cast<size_t>(page_data[2]) * 8;
-                if (available > NDEF_READ_MAX_BYTES) {
-                    available = NDEF_READ_MAX_BYTES;
-                }
-
-                uint8_t data[NDEF_READ_MAX_BYTES];
-                size_t read_bytes = 0;
-                // Each READ answers with 4 pages, so the data area is walked 16 bytes at a time
-                // from page 4.
-                for (uint8_t page = 4; read_bytes < available; page += 4) {
-                    if (picc_read_page(internal, page, page_data) != ERROR_NONE) {
-                        break;
+            if (sak == MIFARE_CLASSIC_1K_SAK) {
+                found = mifare_classic_read_ndef_text(internal, uid, uid_len, out, out_size);
+                mifare_stop_crypto1(internal);
+            } else {
+                // The capability container sits in page 3. Its first byte is the NDEF magic
+                // number; anything else means the tag was never formatted for NDEF.
+                uint8_t page_data[16];
+                if (picc_read_16_bytes(internal, 3, page_data) == ERROR_NONE && page_data[0] == 0xE1) {
+                    // The usable data area is bounded by the CC's size byte, which counts 8-byte
+                    // blocks. Capped so a corrupt CC cannot drive an unbounded read.
+                    size_t available = static_cast<size_t>(page_data[2]) * 8;
+                    if (available > NDEF_READ_MAX_BYTES) {
+                        available = NDEF_READ_MAX_BYTES;
                     }
-                    size_t chunk = available - read_bytes;
-                    if (chunk > sizeof(page_data)) {
-                        chunk = sizeof(page_data);
-                    }
-                    memcpy(data + read_bytes, page_data, chunk);
-                    read_bytes += chunk;
-                }
 
-                found = ndef_parse_text_record(data, read_bytes, out, out_size);
+                    uint8_t data[NDEF_READ_MAX_BYTES];
+                    size_t read_bytes = 0;
+                    // Each READ answers with 4 pages, so the data area is walked 16 bytes at a
+                    // time from page 4.
+                    for (uint8_t page = 4; read_bytes < available; page += 4) {
+                        if (picc_read_16_bytes(internal, page, page_data) != ERROR_NONE) {
+                            break;
+                        }
+                        size_t chunk = available - read_bytes;
+                        if (chunk > sizeof(page_data)) {
+                            chunk = sizeof(page_data);
+                        }
+                        memcpy(data + read_bytes, page_data, chunk);
+                        read_bytes += chunk;
+                    }
+
+                    found = ndef_parse_text_record(data, read_bytes, out, out_size);
+                }
             }
         }
         picc_halt(internal);
