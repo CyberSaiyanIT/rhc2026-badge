@@ -15,6 +15,16 @@ one work, so their licences apply independently:
                         GPL v2.0, except retro-core/components/handy (Lynx emulator, zlib).
                         See firmware/retro-go/COPYING.
 
+  firmware/tactility/   **Doom Shareware v1.9** is copyrighted © 1993-1996 by **id Software / ZeniMax Media Inc.**
+  Data/data/roms/Doom/  This file is **proprietary, copyrighted material** and is not covered 
+  doom1.wad.zip         by this repository's open-source license.
+                        It is bundled here in compliance with the original id Software Shareware 
+                        License, which permits free, unmodified distribution of the   shareware 
+                        data file for non-commercial evaluation.
+                        No commercial use, modification of the WAD contents, or extraction of internal assets (textures, audio, maps) is permitted.
+
+Doom® is a registered trademark of id Software / ZeniMax Media Inc. This project is unaffiliated with id Software.
+
 Changes made for this badge are released under the licence of the file they modify.
 
 Third-party components keep their own licences; each carries its COPYING, LICENSE or
