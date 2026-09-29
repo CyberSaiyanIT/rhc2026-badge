@@ -3,8 +3,6 @@ cmake_minimum_required(VERSION 3.20)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_ASM_COMPILE_OBJECT "${CMAKE_CXX_COMPILER_TARGET}")
 
-include("Buildscripts/logo.cmake")
-
 string(ASCII 27 Esc)
 set(ColorReset "${Esc}[m")
 set(Cyan "${Esc}[36m")

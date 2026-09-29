@@ -4,7 +4,7 @@ Tactility is an operating system that focuses on the ESP32 microcontroller famil
 
 See [https://tactilityproject.org](https://tactilityproject.org) for more information.
 
-![photo of devices running Tactility](Documentation/pics/tactility-devices.webp)&nbsp;&nbsp;![screenshot of launcher app](Documentation/pics/screenshot-Launcher.png)
+![screenshot of launcher app](Documentation/pics/screenshot-Launcher.png)
 
 You can run built-in apps or start them from an SD card. It's easy to manage system settings:
 
