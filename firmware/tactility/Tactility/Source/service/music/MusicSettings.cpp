@@ -34,7 +34,7 @@ struct Settings {
     bool monoDownmix = false;
     Fade fade = Fade::Short;
 
-    bool vuSeeding = false;
+    bool vuSeeding = true;
 };
 
 constexpr Settings DEFAULTS {};
