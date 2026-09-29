@@ -141,6 +141,8 @@ struct Context {
 
     std::string pendingUsername;
     std::atomic<bool> usernameSubmitted { false };
+    std::atomic<bool> usernameChangeRequested { false };
+    uint8_t scanAPressCount = 0;
 
     std::atomic<RequestState> requestState { RequestState::Idle };
     std::atomic<int> pendingAnswer { -1 };
@@ -392,6 +394,19 @@ void startWifi(Context* ctx) {
 
 void renderBody(Context* ctx);
 
+void onScanningKey(lv_event_t* event) {
+    auto* ctx = static_cast<Context*>(lv_event_get_user_data(event));
+    if (lv_event_get_key(event) == LV_KEY_ESC) {
+        ctx->scanAPressCount++;
+        if (ctx->scanAPressCount == 3) {
+            ctx->scanAPressCount = 0;
+            ctx->usernameChangeRequested.store(true);
+        }
+    } else {
+        ctx->scanAPressCount = 0;
+    }
+}
+
 void onAnswerPressed(lv_event_t* event) {
     auto* ctx = static_cast<Context*>(lv_event_get_user_data(event));
     auto* target = static_cast<lv_obj_t*>(lv_event_get_target(event));
@@ -475,6 +490,17 @@ void renderScanning(Context* ctx) {
 
     auto* player = createMessageLabel(ctx->body, "PLAYER // " + ctx->settings.username, FONT_SIZE_SMALL, COLOR_ACCENT);
     lv_obj_set_style_text_align(player, LV_TEXT_ALIGN_CENTER, 0);
+
+    auto* keyReceiver = lv_obj_create(ctx->body);
+    lv_obj_remove_style_all(keyReceiver);
+    lv_obj_set_size(keyReceiver, 0, 0);
+    lv_obj_add_event_cb(keyReceiver, onScanningKey, LV_EVENT_KEY, ctx);
+    if (auto* group = lv_group_get_default(); group != nullptr) {
+        ctx->scanAPressCount = 0;
+        lv_group_add_obj(group, keyReceiver);
+        lv_group_focus_obj(keyReceiver);
+        lv_group_set_editing(group, true);
+    }
 }
 
 /**
@@ -559,6 +585,9 @@ void renderQuestion(Context* ctx) {
 void renderBody(Context* ctx) {
     if (ctx->body == nullptr) {
         return;
+    }
+    if (auto* group = lv_group_get_default(); group != nullptr) {
+        lv_group_set_editing(group, false);
     }
     lv_obj_clean(ctx->body);
 
@@ -707,6 +736,14 @@ void setCountdownText(Context* ctx, const char* text, uint32_t color) {
 void enterState(Context* ctx, State state) {
     ctx->state = state;
     ctx->stateElapsedMs = 0;
+}
+
+void enterUsernameChange(Context* ctx) {
+    stopReader(ctx);
+    ctx->statusText.clear();
+    enterState(ctx, State::NeedsUsername);
+    refresh(ctx);
+    openUsernameKeyboard(ctx);
 }
 
 void enterScanning(Context* ctx) {
@@ -928,6 +965,11 @@ int32_t appMain(int argc, char* argv[]) {
         }
 
         ctx->stateElapsedMs += POLL_INTERVAL_MS;
+
+        if (ctx->usernameChangeRequested.exchange(false) && ctx->state == State::Scanning) {
+            enterUsernameChange(ctx.get());
+            continue;
+        }
 
         switch (ctx->state) {
             case State::NeedsUsername:
