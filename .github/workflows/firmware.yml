@@ -27,6 +27,9 @@ jobs:
       - name: Initialize submodules
         run: firmware/tactility/Buildscripts/init-submodules.sh
 
+      - name: Preload camp map and schedule
+        run: firmware/update_data.sh
+
       - name: Build firmware
         run: firmware/build_all.sh
         env:
