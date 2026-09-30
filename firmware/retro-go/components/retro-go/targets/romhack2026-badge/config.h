@@ -97,8 +97,8 @@
     {RG_KEY_RIGHT,  .num = 2,  .level = 0},\
     {RG_KEY_DOWN,   .num = 3,  .level = 0},\
     {RG_KEY_LEFT,   .num = 5,  .level = 0},\
-    {RG_KEY_A,      .num = 9,  .level = 0},\
-    {RG_KEY_B,      .num = 0,  .level = 0},\
+    {RG_KEY_A,      .num = 0,  .level = 0},\
+    {RG_KEY_B,      .num = 9,  .level = 0},\
     {RG_KEY_START,  .num = 1,  .level = 0},\
     {RG_KEY_MENU,   .num = 8,  .level = 0},\
 }
