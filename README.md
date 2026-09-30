@@ -54,6 +54,39 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
              flash launcher retro-core prboom-go"
 ```
 
+## MicroSD card setup
+
+### Format
+
+FAT32 with an MBR partition table
+
+```bash
+lsblk
+sudo mkfs.fat -F 32 /dev/sdX1
+```
+
+### Layout
+
+
+```
+/
+├── roms/
+│   ├── nes/      .nes .fc .fds .nsf .zip
+│   ├── snes/     .smc .sfc .zip
+│   ├── gb/       .gb .gbc .zip
+│   ├── gbc/      .gbc .gb .zip
+│   ├── gw/       .gw
+│   ├── sms/      .sms .sg .zip
+│   ├── gg/       .gg .zip
+│   ├── col/      .col .rom .zip
+│   ├── pce/      .pce .zip
+│   ├── lnx/      .lnx .zip
+│   └── doom/     .wad .zip
+├── Music/        .mp3 .m4a .aac, upto 4 folders deep
+├── romart/       game covers/artwork
+└── retro-go/     saves, config, themes
+```
+
 ## Acknowledgements
 
 The badge firmware is based on:
