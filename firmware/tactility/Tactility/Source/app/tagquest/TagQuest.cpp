@@ -55,7 +55,7 @@ constexpr int TIMEOUT_CLOSING_MS = 5000;
 constexpr size_t ANSWER_COUNT = 4;
 
 constexpr uint32_t COLOR_BACKGROUND = 0x000000;
-constexpr uint32_t COLOR_ACCENT = 0xE80B60;
+constexpr uint32_t COLOR_ACCENT = 0xFFFFFF;
 constexpr uint32_t COLOR_DIM = 0x53707E;
 /** For the closing seconds and a wrong answer - the only two things worth pulling the eye. */
 constexpr uint32_t COLOR_ALERT = 0xE8542C;
