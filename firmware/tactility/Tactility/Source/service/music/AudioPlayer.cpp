@@ -13,16 +13,17 @@
 
 // audio_element.h must come first: the codec headers below use audio_element_handle_t
 // without including it themselves.
-#include <audio_element.h>
 #include <Tactility/service/music/AudioEffects.h>
+#include <audio_element.h>
 
+#include <aac_decoder.h>
 #include <audio_alc.h>
 #include <audio_event_iface.h>
 #include <audio_pipeline.h>
 #include <audio_sonic.h>
-#include <aac_decoder.h>
 #include <esp_heap_caps.h>
 #include <fatfs_stream.h>
+#include <flac_decoder.h>
 #include <mp3_decoder.h>
 #include <raw_stream.h>
 
@@ -79,11 +80,10 @@ bool hasExtension(const std::string& path, const char* extension) {
  * internal RAM. A null @a task means the calling task.
  */
 void log_stack_headroom(const char* name, TaskHandle_t task) {
-    LOG_I(TAG, "Stack headroom of %s: %u bytes",
-        name, (unsigned) (uxTaskGetStackHighWaterMark(task) * sizeof(StackType_t)));
+    LOG_I(TAG, "Stack headroom of %s: %u bytes", name, (unsigned)(uxTaskGetStackHighWaterMark(task) * sizeof(StackType_t)));
 }
 
-}
+} // namespace
 
 struct AudioPlayer::Impl {
     Device* audioDevice = nullptr;
@@ -111,29 +111,29 @@ struct AudioPlayer::Impl {
 
     TaskHandle_t pumpTask = nullptr;
     TaskHandle_t outputTask = nullptr;
-    std::atomic<bool> running { false };
-    std::atomic<bool> paused { false };
+    std::atomic<bool> running {false};
+    std::atomic<bool> paused {false};
     /** Set by the pump task when the decoder reports end of stream. */
-    std::atomic<bool> sourceDrained { false };
+    std::atomic<bool> sourceDrained {false};
 
-    std::atomic<uint32_t> sampleRate { DEFAULT_SAMPLE_RATE };
-    std::atomic<uint32_t> channels { DEFAULT_CHANNELS };
+    std::atomic<uint32_t> sampleRate {DEFAULT_SAMPLE_RATE};
+    std::atomic<uint32_t> channels {DEFAULT_CHANNELS};
     /** Raised by the event thread; the output task reopens the stream when it differs. */
-    std::atomic<uint32_t> openedSampleRate { 0 };
-    std::atomic<uint32_t> openedChannels { 0 };
+    std::atomic<uint32_t> openedSampleRate {0};
+    std::atomic<uint32_t> openedChannels {0};
 
-    std::atomic<State> state { State::Stopped };
-    std::atomic<uint32_t> underruns { 0 };
-    std::atomic<uint32_t> droppedBytes { 0 };
-    std::atomic<uint8_t> bufferLowPercent { 100 };
+    std::atomic<State> state {State::Stopped};
+    std::atomic<uint32_t> underruns {0};
+    std::atomic<uint32_t> droppedBytes {0};
+    std::atomic<uint8_t> bufferLowPercent {100};
     /** The controller's count when this track started, since the count itself is never reset. */
-    std::atomic<uint32_t> dmaUnderrunBaseline { 0 };
-    std::atomic<uint64_t> bytesPlayed { 0 };
-    std::atomic<uint32_t> durationSeconds { 0 };
-    std::atomic<uint32_t> averageBitrate { 0 };
+    std::atomic<uint32_t> dmaUnderrunBaseline {0};
+    std::atomic<uint64_t> bytesPlayed {0};
+    std::atomic<uint32_t> durationSeconds {0};
+    std::atomic<uint32_t> averageBitrate {0};
 
     /** Byte offset the reader should restart at, or UINT32_MAX for "no seek pending". */
-    std::atomic<uint32_t> seekToByte { UINT32_MAX };
+    std::atomic<uint32_t> seekToByte {UINT32_MAX};
 
     uint64_t fileSize = 0;
     std::string currentPath;
@@ -201,6 +201,10 @@ bool AudioPlayer::Impl::buildPipeline(const std::string& path) {
         // default: only the MP3 path has been measured.
         decoder_config.task_stack = 4096;
         decoder = mp3_decoder_init(&decoder_config);
+    } else if (hasExtension(path, ".flac")) {
+        flac_decoder_cfg_t decoder_config = DEFAULT_FLAC_DECODER_CONFIG();
+        decoder_config.stack_in_ext = false;
+        decoder = flac_decoder_init(&decoder_config);
     } else {
         aac_decoder_cfg_t decoder_config = DEFAULT_AAC_DECODER_CONFIG();
         decoder_config.stack_in_ext = false;
@@ -208,8 +212,8 @@ bool AudioPlayer::Impl::buildPipeline(const std::string& path) {
     }
 
     sonic_cfg_t sonic_config = DEFAULT_SONIC_CONFIG();
-    sonic_config.sonic_info.samplerate = (int) sampleRate.load();
-    sonic_config.sonic_info.channel = (int) channels.load();
+    sonic_config.sonic_info.samplerate = (int)sampleRate.load();
+    sonic_config.sonic_info.channel = (int)channels.load();
     sonic_config.stack_in_ext = false;
     // Measured peak 2000 bytes.
     sonic_config.task_stack = 3072;
@@ -237,7 +241,7 @@ bool AudioPlayer::Impl::buildPipeline(const std::string& path) {
     audio_pipeline_register(pipeline, alc, "alc");
     audio_pipeline_register(pipeline, raw, "raw");
 
-    const char* order[] = { "file", "dec", "sonic", "alc", "raw" };
+    const char* order[] = {"file", "dec", "sonic", "alc", "raw"};
     audio_pipeline_link(pipeline, order, 5);
 
     applySonic();
@@ -270,7 +274,7 @@ void AudioPlayer::Impl::teardownPipeline() {
     // Before the stop: the element tasks are deleted by it, and their stacks go with them.
     // By name because ESP-ADF keeps an element's task handle private to the element, and runs
     // the task under the tag that buildPipeline() registered.
-    for (const char* tag : { "file", "dec", "sonic", "alc" }) {
+    for (const char* tag: {"file", "dec", "sonic", "alc"}) {
         TaskHandle_t task = xTaskGetHandle(tag);
         if (task != nullptr) {
             log_stack_headroom(tag, task);
@@ -284,7 +288,7 @@ void AudioPlayer::Impl::teardownPipeline() {
     // buildPipeline() leaves the elements it never got to as nullptr and play() still tears down,
     // so every element is checked here. audio_element_deinit() dereferences the handle before it
     // tests anything, which turns an element that failed to allocate into a crash.
-    for (audio_element_handle_t element : { reader, decoder, sonic, alc, raw }) {
+    for (audio_element_handle_t element: {reader, decoder, sonic, alc, raw}) {
         if (element != nullptr) {
             audio_pipeline_unregister(pipeline, element);
         }
@@ -297,7 +301,7 @@ void AudioPlayer::Impl::teardownPipeline() {
     }
 
     audio_pipeline_deinit(pipeline);
-    for (audio_element_handle_t element : { reader, decoder, sonic, alc, raw }) {
+    for (audio_element_handle_t element: {reader, decoder, sonic, alc, raw}) {
         if (element != nullptr) {
             audio_element_deinit(element);
         }
@@ -316,7 +320,7 @@ bool AudioPlayer::Impl::openOutput(uint32_t rate, uint32_t channelCount) {
     AudioStreamConfig config {
         .sample_rate = rate,
         .bits_per_sample = BITS_PER_SAMPLE,
-        .channels = (uint8_t) channelCount
+        .channels = (uint8_t)channelCount
     };
 
     if (audio_stream_open_output(audioDevice, &config, &output) != ERROR_NONE) {
@@ -339,15 +343,15 @@ void AudioPlayer::Impl::applyMusicInfo() {
         return;
     }
 
-    sampleRate = (uint32_t) info.sample_rates;
-    channels = (uint32_t) info.channels;
+    sampleRate = (uint32_t)info.sample_rates;
+    channels = (uint32_t)info.channels;
 
     sonic_set_info(sonic, info.sample_rates, info.channels);
 
     if (info.bps > 0) {
-        averageBitrate = (uint32_t) info.bps;
+        averageBitrate = (uint32_t)info.bps;
         if (fileSize > 0) {
-            durationSeconds = (uint32_t) (fileSize * 8 / (uint64_t) info.bps);
+            durationSeconds = (uint32_t)(fileSize * 8 / (uint64_t)info.bps);
         }
     }
 
@@ -365,7 +369,7 @@ void AudioPlayer::Impl::pumpTaskMain(void* context) {
     // External RAM: this task only copies the pipeline's output into the ring, so nothing here
     // touches the buffer often enough for the slower access to matter, and internal RAM is what
     // an app's 16 kB stack has to come from.
-    auto* chunk = (uint8_t*) heap_caps_malloc(PUMP_CHUNK_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    auto* chunk = (uint8_t*)heap_caps_malloc(PUMP_CHUNK_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
     if (chunk == nullptr) {
         LOG_E(TAG, "Failed to allocate pump chunk");
@@ -381,30 +385,29 @@ void AudioPlayer::Impl::pumpTaskMain(void* context) {
         audio_event_iface_msg_t message {};
         if (audio_event_iface_listen(impl->events, &message, 0) == ESP_OK &&
             message.source_type == AUDIO_ELEMENT_TYPE_ELEMENT) {
-            if (message.cmd == AEL_MSG_CMD_REPORT_MUSIC_INFO && message.source == (void*) impl->decoder) {
+            if (message.cmd == AEL_MSG_CMD_REPORT_MUSIC_INFO && message.source == (void*)impl->decoder) {
                 impl->applyMusicInfo();
             } else if (message.cmd == AEL_MSG_CMD_REPORT_STATUS) {
-                const auto status = (audio_element_status_t) (intptr_t) message.data;
-                auto* element = (audio_element_handle_t) message.source;
+                const auto status = (audio_element_status_t)(intptr_t)message.data;
+                auto* element = (audio_element_handle_t)message.source;
                 if (status == AEL_STATUS_ERROR_OPEN || status == AEL_STATUS_ERROR_INPUT ||
                     status == AEL_STATUS_ERROR_PROCESS || status == AEL_STATUS_ERROR_OUTPUT ||
                     status == AEL_STATUS_ERROR_CLOSE || status == AEL_STATUS_ERROR_TIMEOUT ||
                     status == AEL_STATUS_ERROR_UNKNOWN) {
-                    LOG_E(TAG, "Element %s failed with status %d",
-                        audio_element_get_tag(element), (int) status);
+                    LOG_E(TAG, "Element %s failed with status %d", audio_element_get_tag(element), (int)status);
                     impl->sourceDrained = true;
                     break;
                 }
-                LOG_D(TAG, "Element %s status %d", audio_element_get_tag(element), (int) status);
+                LOG_D(TAG, "Element %s status %d", audio_element_get_tag(element), (int)status);
             }
         }
 
-        const int read = raw_stream_read(impl->raw, (char*) chunk, PUMP_CHUNK_BYTES);
+        const int read = raw_stream_read(impl->raw, (char*)chunk, PUMP_CHUNK_BYTES);
         if (read > 0) {
             size_t offset = 0;
-            while (offset < (size_t) read && impl->running.load()) {
+            while (offset < (size_t)read && impl->running.load()) {
                 offset += xStreamBufferSend(
-                    impl->ring, chunk + offset, (size_t) read - offset, pdMS_TO_TICKS(100)
+                    impl->ring, chunk + offset, (size_t)read - offset, pdMS_TO_TICKS(100)
                 );
             }
             continue;
@@ -436,7 +439,7 @@ uint8_t level_from_sum(uint64_t sum_squares, size_t count) {
     if (count == 0) {
         return 0;
     }
-    const float rms = sqrtf((float) ((double) sum_squares / (double) count));
+    const float rms = sqrtf((float)((double)sum_squares / (double)count));
     if (rms < 1.0f) {
         return 0;
     }
@@ -446,7 +449,7 @@ uint8_t level_from_sum(uint64_t sum_squares, size_t count) {
     if (db <= LEVEL_FLOOR_DB) {
         return 0;
     }
-    return (uint8_t) std::clamp((db - LEVEL_FLOOR_DB) / -LEVEL_FLOOR_DB * 255.0f, 0.0f, 255.0f);
+    return (uint8_t)std::clamp((db - LEVEL_FLOOR_DB) / -LEVEL_FLOOR_DB * 255.0f, 0.0f, 255.0f);
 }
 
 // Metered here rather than on the decoder side: the ring holds seconds of decoded audio, so a
@@ -456,12 +459,10 @@ float one_pole_coefficient(float corner_hz, uint32_t sample_rate) {
     if (sample_rate == 0) {
         return 1.0f;
     }
-    return 1.0f - expf(-2.0f * (float) M_PI * corner_hz / (float) sample_rate);
+    return 1.0f - expf(-2.0f * (float)M_PI * corner_hz / (float)sample_rate);
 }
 
-void report_levels(const uint8_t* chunk, size_t bytes, bool stereo, uint32_t sample_rate,
-                   float* low_pass_bass, float* low_pass_treble,
-                   AudioLevelCallback callback, void* context) {
+void report_levels(const uint8_t* chunk, size_t bytes, bool stereo, uint32_t sample_rate, float* low_pass_bass, float* low_pass_treble, AudioLevelCallback callback, void* context) {
     const auto* samples = reinterpret_cast<const int16_t*>(chunk);
     const size_t count = bytes / sizeof(int16_t);
 
@@ -479,7 +480,7 @@ void report_levels(const uint8_t* chunk, size_t bytes, bool stereo, uint32_t sam
 
     for (size_t index = 0; index < count; index++) {
         const int32_t sample = samples[index];
-        const uint64_t square = (uint64_t) (sample * sample);
+        const uint64_t square = (uint64_t)(sample * sample);
         if (stereo && (index & 1u)) {
             sum_right += square;
             count_right++;
@@ -491,15 +492,15 @@ void report_levels(const uint8_t* chunk, size_t bytes, bool stereo, uint32_t sam
         // The band split runs on one channel's worth of samples: doubling the work for a
         // stereo difference that a three-colour mix could not show anyway.
         if (!stereo || (index & 1u) == 0) {
-            const float mono = (float) sample;
+            const float mono = (float)sample;
             *low_pass_bass += bass_coefficient * (mono - *low_pass_bass);
             *low_pass_treble += treble_coefficient * (mono - *low_pass_treble);
             const float bass = *low_pass_bass;
             const float mid = *low_pass_treble - *low_pass_bass;
             const float treble = mono - *low_pass_treble;
-            sum_bass += (double) bass * bass;
-            sum_mid += (double) mid * mid;
-            sum_treble += (double) treble * treble;
+            sum_bass += (double)bass * bass;
+            sum_mid += (double)mid * mid;
+            sum_treble += (double)treble * treble;
             count_mono++;
         }
     }
@@ -507,9 +508,9 @@ void report_levels(const uint8_t* chunk, size_t bytes, bool stereo, uint32_t sam
     AudioLevels levels {};
     levels.left = level_from_sum(sum_left, count_left);
     levels.right = stereo ? level_from_sum(sum_right, count_right) : levels.left;
-    levels.bass = level_from_sum((uint64_t) sum_bass, count_mono);
-    levels.mid = level_from_sum((uint64_t) sum_mid, count_mono);
-    levels.treble = level_from_sum((uint64_t) sum_treble, count_mono);
+    levels.bass = level_from_sum((uint64_t)sum_bass, count_mono);
+    levels.mid = level_from_sum((uint64_t)sum_mid, count_mono);
+    levels.treble = level_from_sum((uint64_t)sum_treble, count_mono);
     callback(levels, context);
 }
 
@@ -526,7 +527,7 @@ void AudioPlayer::Impl::outputTaskMain(void* context) {
     auto* impl = static_cast<Impl*>(context);
     // Deliberately internal, unlike the pump's: every effect walks this buffer sample by sample,
     // and doing that over external RAM is the one place the slower access would be heard.
-    auto* chunk = (uint8_t*) heap_caps_malloc(PUMP_CHUNK_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    auto* chunk = (uint8_t*)heap_caps_malloc(PUMP_CHUNK_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 
     if (chunk == nullptr) {
         LOG_E(TAG, "Failed to allocate output chunk");
@@ -538,7 +539,7 @@ void AudioPlayer::Impl::outputTaskMain(void* context) {
         return;
     }
 
-    impl->effects.configure(impl->sampleRate.load(), (uint8_t) impl->channels.load());
+    impl->effects.configure(impl->sampleRate.load(), (uint8_t)impl->channels.load());
     impl->effects.startFade(true);
 
     TickType_t buffering_since = xTaskGetTickCount();
@@ -556,12 +557,12 @@ void AudioPlayer::Impl::outputTaskMain(void* context) {
             // A source too slow to prefill still plays, but one producing nothing at all is a
             // failure worth reporting rather than an indefinite wait.
             if (timed_out && available == 0) {
-                LOG_E(TAG, "No audio produced within %d ms", (int) BUFFERING_TIMEOUT_MS);
+                LOG_E(TAG, "No audio produced within %d ms", (int)BUFFERING_TIMEOUT_MS);
                 impl->state = State::Error;
                 break;
             }
             if (timed_out) {
-                LOG_W(TAG, "Starting under-filled at %d bytes", (int) available);
+                LOG_W(TAG, "Starting under-filled at %d bytes", (int)available);
             }
 
             impl->state = impl->paused.load() ? State::Paused : State::Playing;
@@ -590,7 +591,7 @@ void AudioPlayer::Impl::outputTaskMain(void* context) {
                 break;
             }
             // Every stage is built for one format, so it follows a mid-track change too.
-            impl->effects.configure(rate, (uint8_t) channelCount);
+            impl->effects.configure(rate, (uint8_t)channelCount);
         }
 
         // The tail of the track, started while there is still enough left in the ring to run
@@ -606,7 +607,7 @@ void AudioPlayer::Impl::outputTaskMain(void* context) {
         // Not while the tail of the track is draining: the ring empties to nothing at the end of
         // every healthy track, which would leave the mark reading zero and meaning nothing.
         if (!impl->sourceDrained.load()) {
-            const auto remaining = (uint8_t) (xStreamBufferBytesAvailable(impl->ring) * 100 / RING_BYTES);
+            const auto remaining = (uint8_t)(xStreamBufferBytesAvailable(impl->ring) * 100 / RING_BYTES);
             if (remaining < impl->bufferLowPercent.load()) {
                 impl->bufferLowPercent = remaining;
             }
@@ -621,13 +622,11 @@ void AudioPlayer::Impl::outputTaskMain(void* context) {
             continue;
         }
 
-        impl->effects.process(reinterpret_cast<int16_t*>(chunk),
-            received / (channelCount * (BITS_PER_SAMPLE / 8)));
+        impl->effects.process(reinterpret_cast<int16_t*>(chunk), received / (channelCount * (BITS_PER_SAMPLE / 8)));
 
         // Metered after the effects, so what the lights show is what the speaker is doing.
         if (impl->levelCallback != nullptr) {
-            report_levels(chunk, received, impl->channels.load() == 2, impl->sampleRate.load(),
-                &impl->lowPassBass, &impl->lowPassTreble, impl->levelCallback, impl->levelContext);
+            report_levels(chunk, received, impl->channels.load() == 2, impl->sampleRate.load(), &impl->lowPassBass, &impl->lowPassTreble, impl->levelCallback, impl->levelContext);
         }
 
         size_t written = 0;
@@ -638,7 +637,7 @@ void AudioPlayer::Impl::outputTaskMain(void* context) {
         // A write that timed out part way leaves the rest of the chunk unplayed. Silently
         // dropping it is what made a stutter look like a clean run.
         if (written < received) {
-            impl->droppedBytes += (uint32_t) (received - written);
+            impl->droppedBytes += (uint32_t)(received - written);
         }
     }
 
@@ -671,9 +670,9 @@ AudioPlayer::AudioPlayer() : impl(new Impl()) {
         return;
     }
 
-    impl->ringStorage = (uint8_t*) heap_caps_malloc(RING_BYTES + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    impl->ringStorage = (uint8_t*)heap_caps_malloc(RING_BYTES + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (impl->ringStorage == nullptr) {
-        LOG_E(TAG, "Failed to allocate %d byte ring buffer", (int) RING_BYTES);
+        LOG_E(TAG, "Failed to allocate %d byte ring buffer", (int)RING_BYTES);
         return;
     }
 
@@ -712,7 +711,7 @@ bool AudioPlayer::play(const std::string& path) {
     std::lock_guard lock(impl->mutex);
 
     struct stat file_stat {};
-    impl->fileSize = stat(path.c_str(), &file_stat) == 0 ? (uint64_t) file_stat.st_size : 0;
+    impl->fileSize = stat(path.c_str(), &file_stat) == 0 ? (uint64_t)file_stat.st_size : 0;
     impl->currentPath = path;
     impl->bytesPlayed = 0;
     impl->underruns = 0;
@@ -833,7 +832,7 @@ bool AudioPlayer::seek(uint32_t seconds) {
     }
 
     const auto path = impl->currentPath;
-    const uint64_t offset = (uint64_t) seconds * bitrate / 8;
+    const uint64_t offset = (uint64_t)seconds * bitrate / 8;
     if (offset >= impl->fileSize) {
         return false;
     }
@@ -844,8 +843,8 @@ bool AudioPlayer::seek(uint32_t seconds) {
     }
 
     std::lock_guard lock(impl->mutex);
-    audio_element_set_byte_pos(impl->reader, (int64_t) offset);
-    impl->bytesPlayed = (uint64_t) seconds * impl->sampleRate.load() * impl->channels.load() * (BITS_PER_SAMPLE / 8);
+    audio_element_set_byte_pos(impl->reader, (int64_t)offset);
+    impl->bytesPlayed = (uint64_t)seconds * impl->sampleRate.load() * impl->channels.load() * (BITS_PER_SAMPLE / 8);
     return true;
 }
 
@@ -903,18 +902,18 @@ Telemetry AudioPlayer::getTelemetry() const {
     telemetry.droppedBytes = impl->droppedBytes.load();
     telemetry.bufferLowPercent = impl->bufferLowPercent.load();
     telemetry.sourceSampleRate = impl->sampleRate.load();
-    telemetry.sourceChannels = (uint8_t) impl->channels.load();
+    telemetry.sourceChannels = (uint8_t)impl->channels.load();
     telemetry.durationSeconds = impl->durationSeconds.load();
     telemetry.finished = impl->sourceDrained.load() && impl->state.load() == State::Stopped;
     telemetry.clipping = impl->effects.isClipping();
 
     if (impl->ring != nullptr) {
-        telemetry.bufferPercent = (uint8_t) (xStreamBufferBytesAvailable(impl->ring) * 100 / RING_BYTES);
+        telemetry.bufferPercent = (uint8_t)(xStreamBufferBytesAvailable(impl->ring) * 100 / RING_BYTES);
     }
 
     const uint32_t bytes_per_second = impl->sampleRate.load() * impl->channels.load() * (BITS_PER_SAMPLE / 8);
     if (bytes_per_second > 0) {
-        telemetry.positionSeconds = (uint32_t) (impl->bytesPlayed.load() / bytes_per_second);
+        telemetry.positionSeconds = (uint32_t)(impl->bytesPlayed.load() / bytes_per_second);
     }
 
     return telemetry;
@@ -922,4 +921,4 @@ Telemetry AudioPlayer::getTelemetry() const {
 
 // endregion
 
-}
+} // namespace tt::service::music
