@@ -29,13 +29,13 @@ constexpr int MAX_ATOM_DEPTH = 6;
 constexpr size_t MAX_COVER_BYTES = 2u * 1024u * 1024u;
 
 uint32_t be32(const uint8_t* data) {
-    return ((uint32_t) data[0] << 24) | ((uint32_t) data[1] << 16) | ((uint32_t) data[2] << 8) | data[3];
+    return ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) | ((uint32_t)data[2] << 8) | data[3];
 }
 
 /** ID3v2 stores sizes seven bits per byte so a size can never contain a frame sync. */
 uint32_t syncsafe32(const uint8_t* data) {
-    return ((uint32_t) (data[0] & 0x7f) << 21) | ((uint32_t) (data[1] & 0x7f) << 14) |
-        ((uint32_t) (data[2] & 0x7f) << 7) | (uint32_t) (data[3] & 0x7f);
+    return ((uint32_t)(data[0] & 0x7f) << 21) | ((uint32_t)(data[1] & 0x7f) << 14) |
+        ((uint32_t)(data[2] & 0x7f) << 7) | (uint32_t)(data[3] & 0x7f);
 }
 
 std::string trimmed(std::string value) {
@@ -61,7 +61,7 @@ std::string decodeTextFrame(const uint8_t* data, size_t length) {
     size_t text_length = length - 1;
 
     if (encoding == 0 || encoding == 3) {
-        return trimmed(std::string((const char*) text, strnlen((const char*) text, text_length)));
+        return trimmed(std::string((const char*)text, strnlen((const char*)text, text_length)));
     }
 
     bool little_endian = true;
@@ -81,7 +81,7 @@ std::string decodeTextFrame(const uint8_t* data, size_t length) {
         if (byte == 0) {
             break;
         }
-        out.push_back((char) byte);
+        out.push_back((char)byte);
     }
     return trimmed(out);
 }
@@ -123,7 +123,7 @@ std::string readId3v2(FILE* file, bool& outFound) {
 
         size_t frame_size;
         if (major <= 2) {
-            frame_size = ((size_t) tag[offset + 3] << 16) | ((size_t) tag[offset + 4] << 8) | tag[offset + 5];
+            frame_size = ((size_t)tag[offset + 3] << 16) | ((size_t)tag[offset + 4] << 8) | tag[offset + 5];
         } else if (major == 4) {
             frame_size = syncsafe32(&tag[offset + 4]);
         } else {
@@ -143,7 +143,7 @@ std::string readId3v2(FILE* file, bool& outFound) {
 }
 
 uint8_t* allocate_cover(size_t size) {
-    return (uint8_t*) heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return (uint8_t*)heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 }
 
 /**
@@ -168,7 +168,7 @@ size_t cover_image_offset(const uint8_t* payload, size_t size, uint8_t major) {
         if (terminator == nullptr) {
             return 0;
         }
-        offset = (size_t) ((const uint8_t*) terminator - payload) + 1;
+        offset = (size_t)((const uint8_t*)terminator - payload) + 1;
     }
 
     offset += 1; // picture type
@@ -187,7 +187,7 @@ size_t cover_image_offset(const uint8_t* payload, size_t size, uint8_t major) {
         if (terminator == nullptr) {
             return 0;
         }
-        offset = (size_t) ((const uint8_t*) terminator - payload) + 1;
+        offset = (size_t)((const uint8_t*)terminator - payload) + 1;
     }
 
     return offset < size ? offset : 0;
@@ -203,7 +203,7 @@ CoverArt readId3v2Cover(FILE* file) {
 
     const uint8_t major = header[3];
     const uint8_t flags = header[5];
-    const long tag_end = 10 + (long) syncsafe32(header + 6);
+    const long tag_end = 10 + (long)syncsafe32(header + 6);
 
     // Unsynchronisation rewrites the tag body and cannot be undone while seeking header by
     // header. Rare enough to give up on, and the sibling cover file is still tried.
@@ -216,7 +216,7 @@ CoverArt readId3v2Cover(FILE* file) {
     const char* wanted = major <= 2 ? "PIC" : "APIC";
 
     long offset = 10;
-    while (offset + (long) header_length <= tag_end) {
+    while (offset + (long)header_length <= tag_end) {
         uint8_t frame[10];
         if (fseek(file, offset, SEEK_SET) != 0 ||
             fread(frame, 1, header_length, file) != header_length) {
@@ -229,14 +229,14 @@ CoverArt readId3v2Cover(FILE* file) {
 
         size_t frame_size;
         if (major <= 2) {
-            frame_size = ((size_t) frame[3] << 16) | ((size_t) frame[4] << 8) | frame[5];
+            frame_size = ((size_t)frame[3] << 16) | ((size_t)frame[4] << 8) | frame[5];
         } else if (major == 4) {
             frame_size = syncsafe32(&frame[4]);
         } else {
             frame_size = be32(&frame[4]);
         }
 
-        if (frame_size == 0 || offset + (long) header_length + (long) frame_size > tag_end) {
+        if (frame_size == 0 || offset + (long)header_length + (long)frame_size > tag_end) {
             return {};
         }
 
@@ -261,10 +261,10 @@ CoverArt readId3v2Cover(FILE* file) {
             // Moved to the front so the caller owns one buffer that is exactly the image.
             const size_t image_size = frame_size - image_offset;
             memmove(payload, payload + image_offset, image_size);
-            return CoverArt { payload, image_size };
+            return CoverArt {payload, image_size};
         }
 
-        offset += (long) header_length + (long) frame_size;
+        offset += (long)header_length + (long)frame_size;
     }
     return {};
 }
@@ -280,7 +280,7 @@ CoverArt findCoverAtom(FILE* file, long offset, long end, int depth) {
         if (fseek(file, offset, SEEK_SET) != 0 || fread(header, 1, sizeof(header), file) != sizeof(header)) {
             return {};
         }
-        long size = (long) be32(header);
+        long size = (long)be32(header);
         if (size == 0) {
             size = end - offset;
         }
@@ -288,7 +288,7 @@ CoverArt findCoverAtom(FILE* file, long offset, long end, int depth) {
             return {};
         }
 
-        const char* type = (const char*) header + 4;
+        const char* type = (const char*)header + 4;
         const bool container = memcmp(type, "moov", 4) == 0 || memcmp(type, "udta", 4) == 0 ||
             memcmp(type, "ilst", 4) == 0 || memcmp(type, "meta", 4) == 0;
 
@@ -303,11 +303,11 @@ CoverArt findCoverAtom(FILE* file, long offset, long end, int depth) {
             if (fread(data_header, 1, sizeof(data_header), file) == sizeof(data_header) &&
                 memcmp(data_header + 4, "data", 4) == 0) {
                 const long payload = size - 8 - 16;
-                if (payload > 0 && (size_t) payload <= MAX_COVER_BYTES) {
-                    uint8_t* image = allocate_cover((size_t) payload);
+                if (payload > 0 && (size_t)payload <= MAX_COVER_BYTES) {
+                    uint8_t* image = allocate_cover((size_t)payload);
                     if (image != nullptr) {
-                        if (fread(image, 1, (size_t) payload, file) == (size_t) payload) {
-                            return CoverArt { image, (size_t) payload };
+                        if (fread(image, 1, (size_t)payload, file) == (size_t)payload) {
+                            return CoverArt {image, (size_t)payload};
                         }
                         heap_caps_free(image);
                     }
@@ -329,7 +329,7 @@ std::string readId3v1(FILE* file) {
     if (fread(tag, 1, sizeof(tag), file) != sizeof(tag) || memcmp(tag, "TAG", 3) != 0) {
         return {};
     }
-    return trimmed(std::string((const char*) tag + 33, strnlen((const char*) tag + 33, 30)));
+    return trimmed(std::string((const char*)tag + 33, strnlen((const char*)tag + 33, 30)));
 }
 
 /**
@@ -347,7 +347,7 @@ std::string findArtistAtom(FILE* file, long offset, long end, int depth) {
         if (fseek(file, offset, SEEK_SET) != 0 || fread(header, 1, sizeof(header), file) != sizeof(header)) {
             return {};
         }
-        long size = (long) be32(header);
+        long size = (long)be32(header);
         // 0 means "to the end of the parent"; 1 means a 64-bit size follows, which no tag needs.
         if (size == 0) {
             size = end - offset;
@@ -356,7 +356,7 @@ std::string findArtistAtom(FILE* file, long offset, long end, int depth) {
             return {};
         }
 
-        const char* type = (const char*) header + 4;
+        const char* type = (const char*)header + 4;
         // The four containers on the way down, plus meta, which carries four bytes of version and
         // flags before its children start.
         const bool container = memcmp(type, "moov", 4) == 0 || memcmp(type, "udta", 4) == 0 ||
@@ -368,14 +368,14 @@ std::string findArtistAtom(FILE* file, long offset, long end, int depth) {
             if (!artist.empty()) {
                 return artist;
             }
-        } else if (memcmp(type + 1, "ART", 3) == 0 && (uint8_t) type[0] == 0xa9) {
+        } else if (memcmp(type + 1, "ART", 3) == 0 && (uint8_t)type[0] == 0xa9) {
             // The value lives in a data atom: size, "data", version and flags, locale, payload.
             uint8_t data_header[16];
             if (fread(data_header, 1, sizeof(data_header), file) == sizeof(data_header) &&
                 memcmp(data_header + 4, "data", 4) == 0) {
                 const long payload = size - 8 - 16;
                 if (payload > 0) {
-                    std::string value((size_t) std::min<long>(payload, MAX_VALUE_BYTES), '\0');
+                    std::string value((size_t)std::min<long>(payload, MAX_VALUE_BYTES), '\0');
                     if (fread(value.data(), 1, value.size(), file) == value.size()) {
                         return trimmed(value);
                     }
@@ -433,7 +433,7 @@ CoverArt readCoverArt(const std::string& path) {
     }
 
     CoverArt cover {};
-    if (hasExtension(path, ".mp3")) {
+    if (hasExtension(path, ".mp3") || hasExtension(path, ".flac")) {
         cover = readId3v2Cover(file);
     } else if (fseek(file, 0, SEEK_END) == 0) {
         const long end = ftell(file);

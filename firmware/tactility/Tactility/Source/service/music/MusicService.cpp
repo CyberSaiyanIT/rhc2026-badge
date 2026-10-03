@@ -1,5 +1,5 @@
-#include <Tactility/service/music/MusicService.h>
 #include <Tactility/service/music/MediaKeys.h>
+#include <Tactility/service/music/MusicService.h>
 #include <Tactility/service/music/TrackTags.h>
 
 #include <Tactility/MountPoints.h>
@@ -18,8 +18,8 @@
 #include <algorithm>
 #include <cstring>
 #include <dirent.h>
-#include <sys/stat.h>
 #include <format>
+#include <sys/stat.h>
 
 namespace tt::service::music {
 
@@ -48,24 +48,24 @@ struct Preset {
 
 // Bands run 31 Hz to 16 kHz; ADF clamps each to +/-13 dB.
 constexpr Preset PRESETS[] = {
-    { "Flat",    {  0,  0,  0,  0,  0,  0,  0,  0,  0,  0 } },
-    { "Bass",    {  9,  8,  6,  3,  0,  0,  0,  0,  0,  0 } },
-    { "Treble",  {  0,  0,  0,  0,  0,  2,  4,  6,  8,  9 } },
-    { "Vocal",   { -4, -3,  0,  3,  5,  5,  3,  1,  0, -1 } },
-    { "Rock",    {  6,  4,  2, -1, -2,  0,  3,  5,  6,  6 } },
-    { "Podcast", { -6, -4,  0,  4,  6,  5,  3,  0, -2, -4 } },
-    { "Loudness", {  8,  6,  3,  0, -1, -1,  0,  3,  6,  8 } },
+    {"Flat", {0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {"Bass", {9, 8, 6, 3, 0, 0, 0, 0, 0, 0}},
+    {"Treble", {0, 0, 0, 0, 0, 2, 4, 6, 8, 9}},
+    {"Vocal", {-4, -3, 0, 3, 5, 5, 3, 1, 0, -1}},
+    {"Rock", {6, 4, 2, -1, -2, 0, 3, 5, 6, 6}},
+    {"Podcast", {-6, -4, 0, 4, 6, 5, 3, 0, -2, -4}},
+    {"Loudness", {8, 6, 3, 0, -1, -1, 0, 3, 6, 8}},
     // The badge's speaker cannot move air below roughly 200 Hz, so feeding it those bands only
     // spends headroom on distortion. Cutting them and lifting the upper mids is what makes it
     // sound louder and clearer at the same amplifier setting.
-    { "Badge",   { -9, -7, -2,  3,  5,  6,  4,  2,  0, -2 } },
+    {"Badge", {-9, -7, -2, 3, 5, 6, 4, 2, 0, -2}},
 };
-constexpr int PRESET_COUNT = (int) (sizeof(PRESETS) / sizeof(PRESETS[0]));
+constexpr int PRESET_COUNT = (int)(sizeof(PRESETS) / sizeof(PRESETS[0]));
 
 bool isPlayable(const char* name) {
-    static const char* extensions[] = { ".mp3", ".m4a", ".aac" };
+    static const char* extensions[] = {".mp3", ".m4a", ".aac", ".flac"};
     const auto name_length = strlen(name);
-    for (const auto* extension : extensions) {
+    for (const auto* extension: extensions) {
         const auto length = strlen(extension);
         if (name_length > length && strcasecmp(name + name_length - length, extension) == 0) {
             return true;
@@ -108,7 +108,7 @@ std::vector<LibraryEntry> readDirectory(const std::string& directory) {
         if (!folder && !isPlayable(entry->d_name)) {
             continue;
         }
-        entries.push_back(LibraryEntry { std::move(path), entry->d_name, folder });
+        entries.push_back(LibraryEntry {std::move(path), entry->d_name, folder});
     }
     closedir(dir);
 
@@ -169,7 +169,7 @@ void MusicService::resolveLibraryRootLocked() const {
 }
 
 int MusicService::enqueueLocked(const std::string& path, int depth) {
-    if ((int) queue.size() >= ENQUEUE_MAX_FILES) {
+    if ((int)queue.size() >= ENQUEUE_MAX_FILES) {
         return 0;
     }
 
@@ -184,14 +184,14 @@ int MusicService::enqueueLocked(const std::string& path, int depth) {
     }
 
     int added = 0;
-    for (const auto& entry : readDirectory(path)) {
+    for (const auto& entry: readDirectory(path)) {
         added += enqueueLocked(entry.path, depth + 1);
     }
     return added;
 }
 
 void MusicService::removeQueueIndexLocked(int index) {
-    if (index < 0 || index >= (int) queue.size()) {
+    if (index < 0 || index >= (int)queue.size()) {
         return;
     }
 
@@ -214,7 +214,7 @@ void MusicService::removeQueueIndexLocked(int index) {
 
     // Whatever moved into this slot is the next track. Off the end, the same rule that ends a
     // track applies: wrap when repeating, otherwise stop.
-    if (index >= (int) queue.size()) {
+    if (index >= (int)queue.size()) {
         if (repeat != Repeat::All) {
             trackIndex = -1;
             releasePlayer();
@@ -294,7 +294,7 @@ void MusicService::startTrackLocked(int index) {
         return;
     }
     ensurePlayer();
-    trackIndex = std::clamp(index, 0, (int) queue.size() - 1);
+    trackIndex = std::clamp(index, 0, (int)queue.size() - 1);
 
     // Set before playing, not after: these live past the ring buffer and the output task asks for
     // them as soon as it starts, which is early enough to race a push that came after play().
@@ -311,7 +311,7 @@ void MusicService::startTrackLocked(int index) {
     // Reported here rather than where the player reports its own tasks: this thread outlives every
     // pipeline, and a track change is the one point it passes through per track. The value is the
     // least it ever had free, so it covers every tick before this one.
-    LOG_I(TAG, "Stack headroom of music_tick: %u bytes", (unsigned) tickThread->getStackSpace());
+    LOG_I(TAG, "Stack headroom of music_tick: %u bytes", (unsigned)tickThread->getStackSpace());
     setMediaKeysEnabled(true);
 
     const auto slash = path.find_last_of('/');
@@ -319,8 +319,8 @@ void MusicService::startTrackLocked(int index) {
     stats.addPlay(slash == std::string::npos ? path : path.substr(slash + 1), trackArtist);
 
     // These reach pipeline elements, which only exist once play() has built them.
-    player->setSpeed((float) speedPercent / 100.0f);
-    player->setPitch((float) pitchPercent / 100.0f);
+    player->setSpeed((float)speedPercent / 100.0f);
+    player->setPitch((float)pitchPercent / 100.0f);
     applyGainLocked();
 }
 
@@ -329,11 +329,11 @@ int MusicService::nextIndexLocked() {
         return -1;
     }
     if (shuffle) {
-        std::uniform_int_distribution<int> distribution(0, (int) queue.size() - 1);
+        std::uniform_int_distribution<int> distribution(0, (int)queue.size() - 1);
         return distribution(rng);
     }
     const int next = trackIndex + 1;
-    if (next >= (int) queue.size()) {
+    if (next >= (int)queue.size()) {
         return repeat == Repeat::All ? 0 : -1;
     }
     return next;
@@ -345,7 +345,7 @@ int MusicService::nextIndexLocked() {
 int MusicService::effectiveGainLocked() const {
     int trim = 0;
     if (autoPreamp) {
-        for (const int gain : bandGains) {
+        for (const int gain: bandGains) {
             trim = std::max(trim, gain);
         }
     }
@@ -392,10 +392,17 @@ void MusicService::onTick() {
     lock.lock();
 
     switch (takeMediaCommand()) {
-        case MediaCommand::PlayPause: playPauseLocked(); break;
-        case MediaCommand::Next: nextLocked(); break;
-        case MediaCommand::Previous: previousLocked(); break;
-        default: break;
+        case MediaCommand::PlayPause:
+            playPauseLocked();
+            break;
+        case MediaCommand::Next:
+            nextLocked();
+            break;
+        case MediaCommand::Previous:
+            previousLocked();
+            break;
+        default:
+            break;
     }
 
     // Ahead of the early exits below: the hand-back has to keep ageing once the player is gone.
@@ -505,7 +512,7 @@ int MusicService::getTrackIndex() const {
 std::string MusicService::getTrackPath() const {
     auto lock = mutex.asScopedLock();
     lock.lock();
-    if (trackIndex < 0 || trackIndex >= (int) queue.size()) {
+    if (trackIndex < 0 || trackIndex >= (int)queue.size()) {
         return {};
     }
     return queue[trackIndex];
@@ -520,7 +527,7 @@ std::string MusicService::getTrackArtist() const {
 std::string MusicService::getQueuePathAt(int index) const {
     auto lock = mutex.asScopedLock();
     lock.lock();
-    if (index < 0 || index >= (int) queue.size()) {
+    if (index < 0 || index >= (int)queue.size()) {
         return {};
     }
     return queue[index];
@@ -536,7 +543,7 @@ std::string MusicService::getLibraryPath() const {
 void MusicService::playQueueIndex(int index) {
     auto lock = mutex.asScopedLock();
     lock.lock();
-    if (index < 0 || index >= (int) queue.size()) {
+    if (index < 0 || index >= (int)queue.size()) {
         return;
     }
     startTrackLocked(index);
@@ -547,14 +554,14 @@ void MusicService::enqueue(const std::string& path) {
     lock.lock();
     const int added = enqueueLocked(path, 0);
     if (added == 0) {
-        LOG_W(TAG, "Nothing queued from %s (queue holds %d)", path.c_str(), (int) queue.size());
+        LOG_W(TAG, "Nothing queued from %s (queue holds %d)", path.c_str(), (int)queue.size());
     }
 }
 
 void MusicService::enqueueAndPlay(const std::string& path) {
     auto lock = mutex.asScopedLock();
     lock.lock();
-    const int start = (int) queue.size();
+    const int start = (int)queue.size();
     if (enqueueLocked(path, 0) == 0) {
         return;
     }
@@ -571,7 +578,7 @@ void MusicService::removeFromQueueByPath(const std::string& path) {
     auto lock = mutex.asScopedLock();
     lock.lock();
     // Back to front, so each removal leaves the indexes still to check where they were.
-    for (int index = (int) queue.size() - 1; index >= 0; index--) {
+    for (int index = (int)queue.size() - 1; index >= 0; index--) {
         if (queue[index] == path) {
             removeQueueIndexLocked(index);
         }
@@ -642,7 +649,7 @@ void MusicService::previousLocked() {
         return;
     }
     const int previous = trackIndex - 1;
-    startTrackLocked(previous < 0 ? (int) queue.size() - 1 : previous);
+    startTrackLocked(previous < 0 ? (int)queue.size() - 1 : previous);
 }
 
 void MusicService::seek(uint32_t seconds) {
@@ -756,7 +763,7 @@ void MusicService::setSpeedPercent(int percent) {
     lock.lock();
     speedPercent = percent;
     if (player != nullptr) {
-        player->setSpeed((float) percent / 100.0f);
+        player->setSpeed((float)percent / 100.0f);
     }
 }
 
@@ -771,7 +778,7 @@ void MusicService::setPitchPercent(int percent) {
     lock.lock();
     pitchPercent = percent;
     if (player != nullptr) {
-        player->setPitch((float) percent / 100.0f);
+        player->setPitch((float)percent / 100.0f);
     }
 }
 
